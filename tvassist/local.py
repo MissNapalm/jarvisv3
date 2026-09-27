@@ -36,7 +36,7 @@ class LocalBrain:
         self.system = SYSTEM_TEMPLATE.format(
             n_series=len(series), series_list="\n".join(f"- {pretty(s)} [{s}]" for s in series)) + LOCAL_RULES
         self.messages: list[dict] = []
-        self.http.post("/api/chat", json={"model": model, "messages": [], "keep_alive": "30m"})  # load into VRAM now
+        self.http.post("/api/chat", json={"model": model, "messages": [], "keep_alive": "4h"})  # load into VRAM now
 
     def reset(self) -> None:
         self.messages = []
@@ -59,7 +59,7 @@ class LocalBrain:
         reply = ""
         for _ in range(MAX_TOOL_ROUNDS):
             r = self.http.post("/api/chat", json={
-                "model": self.model, "stream": False, "think": self.think, "keep_alive": "30m",
+                "model": self.model, "stream": False, "think": self.think, "keep_alive": "4h",
                 "messages": [{"role": "system", "content": self.system}, *self.messages],
                 "tools": self.tool_specs,
                 "options": {"num_ctx": 16384, "temperature": 0.2},

@@ -20,6 +20,7 @@ class Player:
         self.proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self._ducked_from: float | None = None
+        self._held = False
         threading.Thread(target=self._track_progress, daemon=True).start()
 
     # ---------- IPC ----------
@@ -69,7 +70,8 @@ class Player:
         if os.path.exists(self.sock_path):
             os.unlink(self.sock_path)
         args = ["mpv", f"--input-ipc-server={self.sock_path}", "--force-window=immediate",
-                "--keep-open=no", "--idle=no", "--sub-auto=fuzzy", "--really-quiet"]
+                "--keep-open=no", "--idle=no", "--sub-auto=fuzzy", "--really-quiet",
+                "--hwdec=auto-safe"]  # decode on the GPU: smoother 4K/HEVC, less CPU
         if self.fullscreen:
             args.append("--fs")
         if start:
@@ -102,7 +104,28 @@ class Player:
                 "paused": bool(self.get("pause")), "volume": self.get("volume"),
                 "queue_remaining": max(0, (self.get("playlist-count") or 1) - 1 - (self.get("playlist-pos") or 0))}
 
-    # ---------- volume ducking while the assistant listens/speaks ----------
+    # ---------- pausing while the assistant listens ----------
+    def hold(self) -> None:
+        """Pause the show while listening, so its dialogue can't be mistaken for the user talking."""
+        if self.running() and not self.get("pause"):
+            self.set("pause", True)
+            self._held = True
+
+    def release(self) -> None:
+        """Resume a show paused by hold() (no-op if the user's command changed things meanwhile)."""
+        if self._held:
+            self._held = False
+            if self.running():
+                try:
+                    self.set("pause", False)
+                except (RuntimeError, OSError):
+                    pass
+
+    def forget_hold(self) -> None:
+        """The user asked to pause/stop: leave it that way."""
+        self._held = False
+
+    # ---------- volume ducking while the assistant speaks ----------
     def duck(self) -> None:
         if self.running() and self._ducked_from is None and not self.get("pause"):
             vol = self.get("volume")

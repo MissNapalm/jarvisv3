@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -113,7 +114,8 @@ def main() -> None:
         def on_wake():  # runs on the mic thread the moment "Hey Jarvis" is heard
             subprocess.Popen(["pw-play", *(["--target", speaker] if speaker else []), chime],
                              stderr=subprocess.DEVNULL)
-            player.duck()
+            player.hold()
+            listen_started[0] = time.time()
             print(f"\r{GREEN}● Hey Jarvis - listening…{RESET}   ", flush=True)
 
         try:
@@ -153,6 +155,7 @@ def main() -> None:
     prompt()
 
     retried = False
+    listen_started = [0.0]  # when the current listen began (set on the mic thread)
     while True:
         try:
             kind, payload = events.get()
@@ -178,7 +181,8 @@ def main() -> None:
                 if listener is None:
                     prompt()
                     continue
-                player.duck()
+                player.hold()
+                listen_started[0] = time.time()
                 print(f"{GREEN}● listening…{RESET}", flush=True)
                 listener.request_recording()
                 continue
@@ -187,26 +191,30 @@ def main() -> None:
                 listener.disarm()
         else:  # speech from the mic (wake word or Enter)
             if payload is None:
-                player.unduck()
+                player.release()
                 print(f"{DIM}(didn't hear anything){RESET}")
                 listener.arm()
                 prompt()
                 continue
+            listened = time.time() - listen_started[0] if listen_started[0] else 0
             t = time.time()
             heard = transcribe(payload)
             text = voice.strip_wake_phrase(heard)
-            print(f"{BOLD}you:{RESET} {heard}  {DIM}({time.time() - t:.1f}s){RESET}")
+            print(f"{BOLD}you:{RESET} {heard}  {DIM}(listened {listened:.1f}s, transcribed {time.time() - t:.1f}s){RESET}")
             if not text:
                 if not retried:  # just "Hey Jarvis" and a pause, or only noise: listen once more for the command
                     retried = True
                     listener.request_recording()
                     print(f"{GREEN}● listening…{RESET}", flush=True)
                     continue
-                player.unduck()
+                player.release()
                 listener.arm()
                 prompt()
                 continue
         retried = False
+        if re.search(r"\b(pause|stop|hold on|hang on|wait|quit|turn (it )?off)\b", text.lower()):
+            player.forget_hold()  # the user wants it paused/stopped: don't resume afterwards
+        player.release()  # resume the show we paused to listen (a new show starts playing anyway)
 
         t = time.time()
         try:  # instant paths: playback controls, and "play/continue <show>" when the show is unambiguous

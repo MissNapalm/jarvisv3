@@ -75,8 +75,8 @@ NAME_OVERRIDES = {
     "Bionic Woman": "Bionic Woman (2007)", "Law and Order": "Law & Order SVU", "Mr Robot": "Mr. Robot",
     "Euphoria": "Euphoria", "Sense8 (2015)": "Sense8", "The Guild (2007)": "The Guild",
     # /mnt/T/TV
-    "Quantum Leap 1989": "Quantum Leap", "Quantum Leap 2022": "Quantum Leap (2022)",
-    "Night Court (1984)": "Night Court", "Night Court 2023": "Night Court (2023)",
+    "Star Trek": "Star Trek The Original Series", "Quantum Leap 1989": "Quantum Leap", "Quantum Leap 2022": "Quantum Leap (2022)",
+    "Night Court (1984)": "Night Court", "Night Court 1984": "Night Court", "Night Court 2023": "Night Court (2023)",
     "Through the Wormhole With Morgan Freeman": "Through the Wormhole", "Cosmos 1980": "Cosmos (1980)",
     "Cosmos 2019": "Cosmos Possible Worlds", "Cosmos A Space Time Odyssey": "Cosmos A Spacetime Odyssey",
     "Animaniacs 2020": "Animaniacs (2020)", "11 22 63 2016": "11.22.63", "Nana 2006": "Nana",
@@ -118,6 +118,12 @@ def pretty(series: str) -> str:
         if not set(norm(top).split()) & set(norm(s).split()):
             s = f"{top}: {s}"
     return NAME_OVERRIDES.get(s, s)
+
+
+def name_key(name: str) -> str:
+    """Compare show names: case and punctuation don't matter, but a year does
+    ("Night Court (2023)" != "Night Court"), unlike norm() which drops bracketed text."""
+    return re.sub(r"[^a-z0-9]+", " ", name.lower().replace("'", "").replace("’", "")).strip()
 
 
 def season_of_dir(name: str) -> int | None:
@@ -277,8 +283,8 @@ class Library:
         # "TV/Airwolf", or "Night.Court.S01" ... "Night.Court.S09") into a single run of episodes
         canonical: dict[str, str] = {}
         for r in rows:
-            canonical.setdefault(norm(pretty(r[2])), r[2])
-        rows = [(*r[:2], canonical[norm(pretty(r[2]))], *r[3:]) for r in rows]
+            canonical.setdefault(name_key(pretty(r[2])), r[2])
+        rows = [(*r[:2], canonical[name_key(pretty(r[2]))], *r[3:]) for r in rows]
         with self.db:
             self.db.execute("DELETE FROM episodes")
             self.db.executemany(

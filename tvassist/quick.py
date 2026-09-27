@@ -131,12 +131,14 @@ def _count(word: str) -> int | None:
 N = r"(\d+|(?:(?:twenty|thirty|forty|fifty) )?(?:one|two|three|four|five|six|seven|eight|nine)|" \
     r"ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|" \
     r"first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)"
-PLAY = r"(?:continue watching|keep watching|let'?s watch|i want to watch|put on|play|watch|start|continue|resume)"
+PLAY = (r"(?:continue watching|keep watching|let'?s watch|lets watch|let me watch|i want to watch|i wanna watch|"
+        r"id like to watch|i would like to watch|can we watch|we should watch|time for|turn on|throw on|put on|put|"
+        r"play me|play|watch|start|continue|resume)(?: some| an episode of| a bit of| more)?")
 
 
 def resolve_show(lib, name: str) -> str | None:
     """The one series `name` clearly refers to, or None when unsure (then the model decides)."""
-    from .library import norm, pretty
+    from .library import name_key, norm, pretty
 
     def key(x: str) -> str:  # "Grey's Anatomy (2005)" -> "greys anatomy"
         return re.sub(r"\b(19|20)\d\d\b", "", norm(x.replace("'", "").replace("’", ""))).strip()
@@ -145,9 +147,16 @@ def resolve_show(lib, name: str) -> str | None:
     if not q or q in ("it", "something", "anything", "something random", "tv", "the tv"):
         return None
     matches = lib.match_series(name, limit=3)
+    full = [s for s in matches if name_key(pretty(s)) == name_key(name)]
+    if len(full) == 1:  # the name exactly as said, year and all
+        return full[0]
     bare = re.sub(r"^the ", "", q)
     variants = {q, bare, "the " + bare}  # "walking dead" should still find "The Walking Dead"
     exact = [s for s in matches if key(pretty(s)) in variants]
+    if len(exact) > 1:  # "Night Court" vs "Night Court (2023)": a name without a year means the original
+        plain = [s for s in exact if not re.search(r"\b(19|20)\d\d\b", pretty(s))]
+        if len(plain) == 1:
+            return plain[0]
     if len(exact) > 1:  # e.g. two "Doctor Who" folders: take the one watched most recently
         exact = [max(exact, key=lambda s: lib.db.execute(
             "SELECT COALESCE(MAX(h.last_played), 0) FROM history h JOIN episodes e ON e.path = h.path "
@@ -190,7 +199,8 @@ def handle_play(text: str, lib, tools: dict) -> str | None:
             return None
         eps = lib.series_episodes(series)
         return tools["play_episode"].call({"episode_id": eps[0].id, "from_start": True}) if eps else None
-    m = re.fullmatch(PLAY + r" (?:the )?(?:next episode of |next one of |more )?(?:the )?(.+?)(?: from where i left off)?", t)
+    m = re.fullmatch(PLAY + r" (?:the )?(?:next episode of |next one of |more )?(?:the )?(.+?)"
+                     r"(?: from where i left off| where i left off| again| on| next)?", t)
     if m:
         series = resolve_show(lib, m[1])
         return tools["continue_series"].call({"series": series}) if series else None
