@@ -74,6 +74,24 @@ If it can't start, the assistant falls back to the Piper voice and says why (det
 - `tvassist/brain.py`: the tools, system prompt, and the Claude brain
 - `tvassist/local.py`: the free local brain (Ollama)
 - `tvassist/quick.py`: instant handling of simple playback commands
+- `tvassist/report.py`: the "file update" comparison; `snapshot.py`: the daily snapshot job
+
+## File update (are files disappearing?)
+
+Say **"Hey Jarvis, give me a file update"** (or "are any files missing?", "check the files"). It rescans
+the library and compares with the previous day's snapshot: the total, how many files went missing or
+appeared, and which shows they belong to. The full list prints on screen and is saved to
+`data/file-report-<date>.txt`.
+
+The snapshots come from `snapshot.py`, run daily at 3 AM by a systemd timer (runs after the next boot if
+the PC was off; skips, rather than records, a day when the network drive is unreachable). Log:
+`data/snapshots.log`. Install:
+
+```bash
+sudo cp systemd/tv-snapshot.* /etc/systemd/system/ && sudo systemctl daemon-reload
+sudo systemctl enable --now tv-snapshot.timer
+systemctl list-timers tv-snapshot.timer     # next run
+```
 
 ## Filename standardization
 

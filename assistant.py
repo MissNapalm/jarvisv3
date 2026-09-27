@@ -19,7 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from tvassist.library import Library  # noqa: E402
-from tvassist import quick  # noqa: E402
+from tvassist import quick, report  # noqa: E402
 from tvassist.player import Player  # noqa: E402
 
 DIM, BOLD, CYAN, GREEN, RESET = "\033[2m", "\033[1m", "\033[36m", "\033[32m", "\033[0m"
@@ -230,6 +230,19 @@ def main() -> None:
         player.release()  # resume the show we paused to listen (a new show starts playing anyway)
 
         t = time.time()
+        reply = None
+        if report.wants_file_update(text):  # "give me a file update": compare with yesterday's files
+            print(f"  {DIM}checking files…{RESET}", flush=True)
+            reply, details = report.file_update(lib, data_dir)
+            print(details)
+            brain.note(text, reply)
+            print(f"{BOLD}assistant:{RESET} {reply}  {DIM}({time.time() - t:.1f}s){RESET}")
+            if speak:
+                speak(reply)
+            if listener:
+                listener.arm()
+            prompt()
+            continue
         try:  # instant paths: playback controls, and "play/continue <show>" when the show is unambiguous
             reply = quick.handle(text, player)
             if reply is None:

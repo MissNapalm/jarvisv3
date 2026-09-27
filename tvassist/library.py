@@ -233,6 +233,8 @@ class Library:
                 path TEXT PRIMARY KEY, position REAL, duration REAL,
                 watched INTEGER DEFAULT 0, last_played REAL);
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE IF NOT EXISTS snapshots(
+                day TEXT PRIMARY KEY, taken REAL, total INTEGER, videos INTEGER, paths BLOB);
         """)
         self._migrate_history()
 
@@ -258,15 +260,22 @@ class Library:
     def scan(self) -> dict:
         t0 = time.time()
         rows = []
+        all_files: list[str] = []  # every file, not just videos, for the daily file-count snapshot
         for root in self.roots:
             for show_dir in sorted(os.listdir(root)):
                 full = root / show_dir
-                if not full.is_dir() or show_dir.startswith((".", "_rename-backup")):
+                if show_dir.startswith((".", "_rename-backup")):
+                    continue
+                if not full.is_dir():
+                    all_files.append(str(full.relative_to(self.base)))
                     continue
                 for dirpath, dirnames, filenames in os.walk(full):
                     dirnames[:] = [d for d in dirnames if not d.startswith(".")]
                     for fn in filenames:
+                        if fn.startswith("."):  # hidden temp files (download ".parts" etc.) come and go
+                            continue
                         p = Path(dirpath) / fn
+                        all_files.append(str(p.relative_to(self.base)))
                         if p.suffix.lower() not in VIDEO_EXTS or SAMPLE.search(p.stem):
                             continue
                         rel = p.relative_to(full)
@@ -291,7 +300,63 @@ class Library:
                 "INSERT INTO episodes(path,show,series,season,episode,title,is_extra,size,mtime,search)"
                 " VALUES(?,?,?,?,?,?,?,?,?,?)", rows)
             self.db.execute("INSERT OR REPLACE INTO meta VALUES('scanned_at', ?)", (str(time.time()),))
-        return {"files": len(rows), "shows": len({r[1] for r in rows}), "seconds": round(time.time() - t0, 1)}
+        if all_files:  # an empty scan means the drive wasn't reachable: never record that as "all gone"
+            self.save_snapshot(all_files, videos=len(rows))
+        return {"files": len(rows), "shows": len({r[1] for r in rows}), "seconds": round(time.time() - t0, 1),
+                "all_files": len(all_files)}
+
+    # ---------- daily file-count snapshots ("give me a file update") ----------
+    KEEP_SNAPSHOTS = 90
+
+    def save_snapshot(self, paths: list[str], videos: int, day: str | None = None) -> None:
+        """Record today's file list (the latest scan of the day wins)."""
+        import zlib
+        day = day or time.strftime("%Y-%m-%d")
+        blob = zlib.compress("\n".join(sorted(paths)).encode())
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO snapshots VALUES(?,?,?,?,?)",
+                            (day, time.time(), len(paths), videos, blob))
+            self.db.execute("DELETE FROM snapshots WHERE day NOT IN "
+                            "(SELECT day FROM snapshots ORDER BY day DESC LIMIT ?)", (self.KEEP_SNAPSHOTS,))
+
+    def has_snapshot_today(self) -> bool:
+        return self.db.execute("SELECT 1 FROM snapshots WHERE day=?", (time.strftime("%Y-%m-%d"),)).fetchone() is not None
+
+    def _snapshot_paths(self, row) -> set[str]:
+        import zlib
+        return set(zlib.decompress(row["paths"]).decode().split("\n")) if row["paths"] else set()
+
+    def file_update(self) -> dict:
+        """Rescan, then compare today's files with the most recent earlier day's snapshot."""
+        reachable = [r for r in self.roots if r.is_dir()]
+        if len(reachable) < len(self.roots):
+            return {"error": "library drive not reachable",
+                    "missing_folders": [str(r) for r in self.roots if not r.is_dir()]}
+        stats = self.scan()
+        if not stats["all_files"]:
+            return {"error": "library drive not reachable (no files found)"}
+        today = time.strftime("%Y-%m-%d")
+        cur = self.db.execute("SELECT * FROM snapshots WHERE day=?", (today,)).fetchone()
+        prev = self.db.execute("SELECT * FROM snapshots WHERE day<? ORDER BY day DESC LIMIT 1", (today,)).fetchone()
+        report = {"today": today, "total": cur["total"], "videos": cur["videos"]}
+        if prev is None:
+            report["previous"] = None
+            return report
+        now_paths, before = self._snapshot_paths(cur), self._snapshot_paths(prev)
+        missing, added = sorted(before - now_paths), sorted(now_paths - before)
+
+        def by_show(paths: list[str]) -> list[tuple[str, int]]:
+            counts: dict[str, int] = {}
+            for p in paths:
+                parts = p.split("/")
+                show = parts[1] if len(parts) > 2 else "the main folder"
+                counts[show] = counts.get(show, 0) + 1
+            return sorted(counts.items(), key=lambda kv: -kv[1])
+
+        report.update({"previous": prev["day"], "previous_total": prev["total"],
+                       "previous_videos": prev["videos"], "missing": missing, "added": added,
+                       "missing_by_show": by_show(missing), "added_by_show": by_show(added)})
+        return report
 
     def is_indexed(self) -> bool:
         return self.db.execute("SELECT 1 FROM episodes LIMIT 1").fetchone() is not None

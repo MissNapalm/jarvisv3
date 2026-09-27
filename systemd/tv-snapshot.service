@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily file-count snapshot of the TV library (for the assistant's "file update")
+After=network-online.target remote-fs.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=phoenix
+Group=phoenix
+ExecStart=/home/phoenix/tv-assistant/.venv/bin/python /home/phoenix/tv-assistant/snapshot.py
+# the library is a network share; give it time to come up after boot
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -d "/mnt/T/TV shows" ] && exit 0; sleep 2; done; exit 0'
+Nice=10
+IOSchedulingClass=idle

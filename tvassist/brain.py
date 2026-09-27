@@ -221,12 +221,22 @@ def build_tools(lib: Library, player: Player) -> list:
         return json.dumps(lib.recently_added(limit))
 
     @beta_tool
+    def file_update() -> str:
+        """Check whether any files disappeared: rescans the library and compares the file count and
+        list with the previous day's snapshot. Use for "give me a file update", "are files missing?"."""
+        from .report import file_update as run
+        import os
+        spoken, details = run(lib, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"))
+        return spoken + "\n\n" + details[:3000]
+
+    @beta_tool
     def library_stats() -> str:
         """Totals for the library: series, episodes, size on disk, episodes watched."""
         return json.dumps(lib.stats())
 
     return [find_series, list_episodes, search_episodes, play_episode, continue_series, play_random,
-            player_control, now_playing, continue_watching, mark_watched, recently_added, library_stats]
+            player_control, now_playing, continue_watching, mark_watched, recently_added, library_stats,
+            file_update]
 
 
 class Brain:

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the TV library file-count snapshot every day
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+# if the PC was off at 3 AM, run shortly after the next boot instead of skipping the day
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
