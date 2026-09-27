@@ -48,6 +48,8 @@ def main() -> None:
     ap.add_argument("--silence", type=float, default=0.8,
                     help="seconds of silence that end a spoken command (default 0.8; raise if it cuts you off)")
     ap.add_argument("--voice", default=os.path.join(HERE, "voices", "en_US-ryan-high.onnx"))
+    ap.add_argument("--voice-sample", default=os.environ.get("TV_VOICE_SAMPLE"),
+                    help="WAV recording (10-30 s) of a voice to clone for replies (needs .venv-voice)")
     ap.add_argument("--scan", action="store_true", help="re-index the library and exit")
     args = ap.parse_args()
 
@@ -108,7 +110,14 @@ def main() -> None:
         print(f"{DIM}Loading speech models ...{RESET}", flush=True)
         transcribe = voice.Transcriber(args.whisper_model)
         if not args.no_speak:
-            speak = voice.Speaker(args.voice, device=speaker).say
+            piper = voice.Speaker(args.voice, device=speaker)
+            speak = piper.say
+            if args.voice_sample:
+                print(f"{DIM}Loading cloned voice from {args.voice_sample} ...{RESET}", flush=True)
+                try:
+                    speak = voice.CloneSpeaker(args.voice_sample, device=speaker, fallback=piper).say
+                except Exception as e:
+                    print(f"{DIM}(cloned voice unavailable, using the standard voice: {e}){RESET}")
         chime = voice.make_chime(os.path.join(data_dir, "chime.wav"))
 
         def on_wake():  # runs on the mic thread the moment "Hey Jarvis" is heard

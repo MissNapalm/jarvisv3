@@ -1,5 +1,6 @@
 # local environment and secrets
 .venv/
+.venv-voice/
 .env
 __pycache__/
 *.pyc

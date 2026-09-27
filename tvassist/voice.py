@@ -237,6 +237,66 @@ class Speaker:
             os.unlink(path)
 
 
+class CloneSpeaker:
+    """Speaks in a cloned voice via Chatterbox Turbo, which runs in its own environment
+    (.venv-voice) as a small server process. Falls back to `fallback` (Piper) if it fails."""
+
+    def __init__(self, sample_path: str, device: str | None = None, fallback: "Speaker | None" = None):
+        import json
+        import sys
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        py = os.path.join(here, ".venv-voice", "bin", "python")
+        if not os.path.exists(py):
+            raise RuntimeError("voice cloning isn't installed (.venv-voice missing)")
+        if not os.path.exists(sample_path):
+            raise RuntimeError(f"voice sample not found: {sample_path}")
+        self.device, self.fallback, self._json = device, fallback, json
+        # its PyTorch ships its own CUDA libraries; the launcher's LD_LIBRARY_PATH (older cuDNN for
+        # Whisper) would make it load the wrong ones
+        env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
+        log_path = os.path.join(here, "data", "clone_server.log")
+        self.proc = subprocess.Popen([py, os.path.join(here, "tvassist", "clone_server.py"), sample_path],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open(log_path, "w"),
+                                     text=True, bufsize=1, env=env)
+        while True:  # skip any library chatter until the server says it's ready
+            line = self.proc.stdout.readline()
+            if not line:
+                with open(log_path) as f:
+                    last = [ln.strip() for ln in f if ln.strip()][-1:] or ["no details"]
+                raise RuntimeError(f"voice cloning server failed to start ({last[0]}; see {log_path})")
+            if line.startswith("{") and json.loads(line).get("ready"):
+                break
+
+    def say(self, text: str) -> None:
+        text = clean_for_speech(text)
+        if not text:
+            return
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            path = f.name
+        try:
+            self.proc.stdin.write(self._json.dumps({"text": text, "out": path}) + "\n")
+            self.proc.stdin.flush()
+            reply = {}
+            while True:
+                line = self.proc.stdout.readline()
+                if not line:
+                    break
+                if line.startswith("{"):
+                    reply = self._json.loads(line)
+                    break
+            if not reply.get("ok"):
+                print(f"[cloned voice failed: {reply.get('error', 'server stopped')}]")
+                if self.fallback:
+                    self.fallback.say(text)
+                return
+            r = subprocess.run(["pw-play", *(["--target", self.device] if self.device else []), path],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"[speech output failed: {r.stderr.strip() or r.returncode}]")
+        finally:
+            os.unlink(path)
+
+
 def clean_for_speech(text: str) -> str:
     text = re.sub(r"```.*?```", "", text, flags=re.S)
     text = re.sub(r"[*_`#>|]", "", text)

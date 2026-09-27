@@ -41,6 +41,22 @@ Simple playback controls (pause, resume, stop, next/previous, volume, mute, seek
 instantly without the model (`tvassist/quick.py`); everything else goes to the model. The library is
 re-indexed on every start (~3 s). While you talk or it speaks, mpv's volume is ducked.
 
+## Cloned voice (optional)
+
+Replies can be spoken in a cloned voice with [Chatterbox Turbo](https://github.com/resemble-ai/chatterbox)
+(local, GPU, ~0.1-0.5 s per reply; output carries Chatterbox's inaudible AI watermark). Only clone a
+voice with its owner's permission. It runs in its own environment because it needs PyTorch:
+
+```bash
+python3 -m venv .venv-voice && .venv-voice/bin/python -m pip install chatterbox-tts "setuptools<81"
+# a clean 10-30 s recording of the voice, e.g. cut from a longer file:
+ffmpeg -ss 94 -t 16 -i recording.wav -ac 1 -ar 24000 data/voice-sample.wav
+echo 'TV_VOICE_SAMPLE="'$PWD'/data/voice-sample.wav"' >> .env      # or --voice-sample PATH
+```
+
+If it can't start, the assistant falls back to the Piper voice and says why (details in
+`data/clone_server.log`).
+
 ## Things to say
 
 - "Continue Breaking Bad" / "Play the next episode of Stargate"
