@@ -103,3 +103,95 @@ def handle(text: str, player: Player) -> str | None:
     if re.fullmatch(r"(go back|rewind|back up|skip back|jump back)", t):
         return seek(-10)
     return None
+
+
+# ---------- instant "play <show>" requests ----------
+
+MORE_NUMBERS = {"eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "sixteen": 16, "seventeen": 17,
+                "eighteen": 18, "nineteen": 19, "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+                "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10}
+
+
+def _count(word: str) -> int | None:
+    """'5', 'five', 'twenty two', 'fifth' -> int."""
+    words = word.split()
+    total = 0
+    for w in words:
+        if w.isdigit():
+            total += int(w)
+        elif w in MORE_NUMBERS:
+            total += MORE_NUMBERS[w]
+        elif w in NUMBERS and w not in ("a", "an", "half a"):
+            total += int(NUMBERS[w])
+        else:
+            return None
+    return total or None
+
+
+N = r"(\d+|(?:(?:twenty|thirty|forty|fifty) )?(?:one|two|three|four|five|six|seven|eight|nine)|" \
+    r"ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|" \
+    r"first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)"
+PLAY = r"(?:continue watching|keep watching|let'?s watch|i want to watch|put on|play|watch|start|continue|resume)"
+
+
+def resolve_show(lib, name: str) -> str | None:
+    """The one series `name` clearly refers to, or None when unsure (then the model decides)."""
+    from .library import norm, pretty
+
+    def key(x: str) -> str:  # "Grey's Anatomy (2005)" -> "greys anatomy"
+        return re.sub(r"\b(19|20)\d\d\b", "", norm(x.replace("'", "").replace("’", ""))).strip()
+
+    q = key(name)
+    if not q or q in ("it", "something", "anything", "something random", "tv", "the tv"):
+        return None
+    matches = lib.match_series(name, limit=3)
+    bare = re.sub(r"^the ", "", q)
+    variants = {q, bare, "the " + bare}  # "walking dead" should still find "The Walking Dead"
+    exact = [s for s in matches if key(pretty(s)) in variants]
+    if len(exact) > 1:  # e.g. two "Doctor Who" folders: take the one watched most recently
+        exact = [max(exact, key=lambda s: lib.db.execute(
+            "SELECT COALESCE(MAX(h.last_played), 0) FROM history h JOIN episodes e ON e.path = h.path "
+            "WHERE e.series = ?", (s,)).fetchone()[0])] if any(lib.watched_paths(s) or lib.next_up(s)[1]
+                                                             for s in exact) else []
+    if len(exact) == 1:
+        return exact[0]
+    contains = [s for s in matches if set(q.split()) <= set(key(pretty(s)).split())]
+    contains = [s for s in contains if ":" not in pretty(s)] or contains  # prefer the show over its specials
+    return contains[0] if len(contains) == 1 else None
+
+
+def handle_play(text: str, lib, tools: dict) -> str | None:
+    """Instantly handle "play/continue <show>" and "play <show> season X episode Y"; else None."""
+    t = normalize(text)
+    t = re.sub(r"^(?:hey jarvis|jarvis)\s+", "", t)
+    m = (re.fullmatch(PLAY + r" (?:the )?(.+?) season " + N + r" episode " + N, t) or
+         re.fullmatch(PLAY + r" season " + N + r" episode " + N + r" of (?:the )?(.+)", t) or
+         re.fullmatch(PLAY + r" episode " + N + r" of season " + N + r" of (?:the )?(.+)", t))
+    if m:
+        g = m.groups()
+        if t.split(" episode ")[0].endswith(" of season") or re.fullmatch(PLAY + r" episode .* of season .*", t):
+            ep, season, show = g
+        elif re.fullmatch(PLAY + r" season .*", t):
+            season, ep, show = g
+        else:
+            show, season, ep = g
+        series = resolve_show(lib, show)
+        season, ep = _count(season), _count(ep)
+        if not (series and season and ep):
+            return None
+        hit = [e for e in lib.series_episodes(series) if e.season == season and e.episode == ep]
+        if not hit:
+            return None  # let the model explain what's available
+        return tools["play_episode"].call({"episode_id": hit[0].id, "from_start": False})
+    m = re.fullmatch(PLAY + r" (?:the )?first episode of (?:the )?(.+)", t)
+    if m:
+        series = resolve_show(lib, m[1])
+        if not series:
+            return None
+        eps = lib.series_episodes(series)
+        return tools["play_episode"].call({"episode_id": eps[0].id, "from_start": True}) if eps else None
+    m = re.fullmatch(PLAY + r" (?:the )?(?:next episode of |next one of |more )?(?:the )?(.+?)(?: from where i left off)?", t)
+    if m:
+        series = resolve_show(lib, m[1])
+        return tools["continue_series"].call({"series": series}) if series else None
+    return None

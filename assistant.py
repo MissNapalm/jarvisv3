@@ -126,6 +126,9 @@ def main() -> None:
 
     threading.Thread(target=keyboard, daemon=True).start()
 
+    from tvassist.brain import build_tools
+    quick_tools = {t.name: t for t in build_tools(lib, player)}
+
     def show_tool(name, inp):
         print(f"  {DIM}→ {name}({', '.join(f'{k}={v!r}' for k, v in inp.items())}){RESET}")
 
@@ -200,8 +203,10 @@ def main() -> None:
         retried = False
 
         t = time.time()
-        try:
-            reply = quick.handle(text, player)  # instant path for simple playback controls
+        try:  # instant paths: playback controls, and "play/continue <show>" when the show is unambiguous
+            reply = quick.handle(text, player)
+            if reply is None:
+                reply = quick.handle_play(text, lib, quick_tools)
         except Exception:
             reply = None
         if reply is not None:
