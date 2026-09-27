@@ -13,6 +13,7 @@ RATE = 16000
 CHUNK = 1536  # 96 ms of 16-bit mono: three 512-sample windows for the Silero speech detector
 CHUNK_SEC = CHUNK / RATE
 MIN_SPEECH_CHUNKS = 3
+SPEECH_THRESHOLD = 0.35  # Silero probability; below the usual 0.5 so quiet voices still count
 
 
 def find_device(query: str, kind: str) -> tuple[str, str]:
@@ -67,7 +68,7 @@ def record_utterance(max_seconds: float = 15.0, silence_after: float = 0.8,
                 break
             chunk = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768
             frames.append(chunk)
-            is_speech = speech_prob(chunk) >= 0.5
+            is_speech = speech_prob(chunk) >= SPEECH_THRESHOLD
             run = run + 1 if is_speech else 0
             # speech only "starts" after ~0.3 s in a row, so a leftover syllable (the tail of
             # "Jarvis") or a click can't start and end a recording on its own
@@ -122,7 +123,7 @@ class MicListener:
     WAKE_FRAME = 1280  # 80 ms, what openWakeWord expects
 
     def __init__(self, events, device: str | None = None, silence_after: float = 0.8,
-                 wake: bool = True, wake_threshold: float = 0.5, on_wake=None, source=None):
+                 wake: bool = True, wake_threshold: float = 0.4, on_wake=None, source=None):
         import threading
         self.events, self.silence_after, self.on_wake = events, silence_after, on_wake
         self.wake_threshold = wake_threshold

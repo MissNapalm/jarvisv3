@@ -45,6 +45,9 @@ def main() -> None:
     ap.add_argument("--mic", default=os.environ.get("TV_MIC"),
                     help="microphone (name or part of it, e.g. 'Yeti'); default: system default")
     ap.add_argument("--no-wake", action="store_true", help='turn off the "Hey Jarvis" wake word')
+    ap.add_argument("--wake-sensitivity", type=float, default=float(os.environ.get("TV_WAKE_THRESHOLD", 0.4)),
+                    help='wake word score needed, 0-1 (default 0.4; lower = hears quieter voices, '
+                         'but more false triggers)')
     ap.add_argument("--silence", type=float, default=0.8,
                     help="seconds of silence that end a spoken command (default 0.8; raise if it cuts you off)")
     ap.add_argument("--voice", default=os.path.join(HERE, "voices", "en_US-ryan-high.onnx"))
@@ -129,7 +132,8 @@ def main() -> None:
 
         try:
             listener = voice.MicListener(events, device=mic, silence_after=args.silence,
-                                         wake=not args.no_wake, on_wake=on_wake)
+                                         wake=not args.no_wake, on_wake=on_wake,
+                                         wake_threshold=args.wake_sensitivity)
         except ImportError:
             print(f"{DIM}(wake word unavailable: pip install openwakeword){RESET}")
             listener = voice.MicListener(events, device=mic, silence_after=args.silence, wake=False)
