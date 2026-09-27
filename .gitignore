@@ -1,0 +1,10 @@
+# local environment and secrets
+.venv/
+.env
+__pycache__/
+*.pyc
+# personal data: library index, watch history, mpv socket, rename backups (full listing of the library)
+data/
+rename-backups/
+# voice models are large (>100 MB); download them per README
+voices/

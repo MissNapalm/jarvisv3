@@ -1,0 +1,8 @@
+anthropic>=1.8.0
+faster-whisper>=1.2.1
+piper-tts>=1.8.0
+numpy
+httpx
+# CUDA libraries for faster-whisper on NVIDIA GPUs
+nvidia-cublas-cu12
+nvidia-cudnn-cu12

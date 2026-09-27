@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Launcher: points faster-whisper at the pip-installed CUDA libraries, then starts the assistant.
+DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+NV="$(echo "$DIR"/.venv/lib/python3*/site-packages/nvidia)"
+export LD_LIBRARY_PATH="$NV/cublas/lib:$NV/cudnn/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+[ -f "$DIR/.env" ] && set -a && . "$DIR/.env" && set +a
+exec "$DIR/.venv/bin/python" "$DIR/assistant.py" "$@"
