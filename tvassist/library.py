@@ -74,6 +74,12 @@ NAME_OVERRIDES = {
     "Cyberpunk - Edgerunners": "Cyberpunk Edgerunners", "Babylon 5: B5 Crusade 1-13": "Crusade",
     "Bionic Woman": "Bionic Woman (2007)", "Law and Order": "Law & Order SVU", "Mr Robot": "Mr. Robot",
     "Euphoria": "Euphoria", "Sense8 (2015)": "Sense8", "The Guild (2007)": "The Guild",
+    # /mnt/T/TV
+    "Quantum Leap 1989": "Quantum Leap", "Quantum Leap 2022": "Quantum Leap (2022)",
+    "Night Court (1984)": "Night Court", "Night Court 2023": "Night Court (2023)",
+    "Through the Wormhole With Morgan Freeman": "Through the Wormhole", "Cosmos 1980": "Cosmos (1980)",
+    "Cosmos 2019": "Cosmos Possible Worlds", "Cosmos A Space Time Odyssey": "Cosmos A Spacetime Odyssey",
+    "Animaniacs 2020": "Animaniacs (2020)", "11 22 63 2016": "11.22.63", "Nana 2006": "Nana",
 }
 
 SMALL_WORDS = {"a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "vs", "with"}
@@ -93,7 +99,7 @@ def title_case(s: str) -> str:
 def pretty(series: str) -> str:
     """A speakable name for a series folder path ('.../Star Trek Voyager The Complete series' -> 'Star Trek Voyager')."""
     leaf = series.split("/")[-1]
-    s = re.sub(r"\[.*?\]|\{.*?\}", " ", leaf)
+    s = re.sub(r"\[.*?\]|\{.*?\}", " ", leaf.replace(".(", " ("))
     s = re.sub(r"\((?!(19|20)\d\d\))[^)]*\)", " ", s)       # keep "(2009)"-style years, drop other brackets
     s = s.replace("_", " ")
     # dots are word separators ("Terra.Nova"), except inside acronyms ("M.D.", "S.H.I.E.L.D")
@@ -202,8 +208,12 @@ class Episode:
 
 
 class Library:
-    def __init__(self, root: str, db_path: str):
-        self.root = Path(root)
+    def __init__(self, roots: str | list[str], db_path: str):
+        """`roots`: one or more library folders (e.g. "/mnt/T/TV shows" and "/mnt/T/TV").
+        Paths are stored relative to the folder that contains them all, e.g. "TV shows/Airwolf/...";
+        shows with the same name in several folders are merged into one series."""
+        self.roots = [Path(r) for r in ([roots] if isinstance(roots, str) else roots)]
+        self.base = Path(os.path.commonpath([str(r.parent) for r in self.roots]))
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
@@ -218,31 +228,57 @@ class Library:
                 watched INTEGER DEFAULT 0, last_played REAL);
             CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
         """)
+        self._migrate_history()
+
+    @property
+    def root(self) -> Path:  # the folder paths are relative to
+        return self.base
+
+    def _migrate_history(self) -> None:
+        """Older databases stored paths relative to a single library folder; prefix them with
+        the folder they're actually in."""
+        if self.db.execute("SELECT value FROM meta WHERE key='path_layout'").fetchone():
+            return
+        with self.db:
+            for (path,) in self.db.execute("SELECT path FROM history").fetchall():
+                for r in self.roots:
+                    if (r / path).exists():
+                        new = str((r / path).relative_to(self.base))
+                        self.db.execute("UPDATE OR IGNORE history SET path=? WHERE path=?", (new, path))
+                        break
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES('path_layout', 'relative-to-base')")
 
     # ---------- indexing ----------
     def scan(self) -> dict:
         t0 = time.time()
         rows = []
-        for show_dir in sorted(os.listdir(self.root)):
-            full = self.root / show_dir
-            if not full.is_dir() or show_dir.startswith("."):
-                continue
-            for dirpath, dirnames, filenames in os.walk(full):
-                dirnames[:] = [d for d in dirnames if not d.startswith(".")]
-                for fn in filenames:
-                    p = Path(dirpath) / fn
-                    if p.suffix.lower() not in VIDEO_EXTS or SAMPLE.search(p.stem):
-                        continue
-                    rel = p.relative_to(full)
-                    season, ep, title = parse_episode(rel)
-                    extra = any(EXTRA_DIR.match(d) for d in rel.parts[:-1]) or bool(EXTRA_FILE.search(p.stem))
-                    try:
-                        st = p.stat()
-                    except OSError:
-                        continue
-                    rows.append((str(p.relative_to(self.root)), show_dir, series_root(show_dir, rel),
-                                 season, ep, title, int(extra), st.st_size, st.st_mtime,
-                                 norm(str(p.relative_to(self.root)))))
+        for root in self.roots:
+            for show_dir in sorted(os.listdir(root)):
+                full = root / show_dir
+                if not full.is_dir() or show_dir.startswith((".", "_rename-backup")):
+                    continue
+                for dirpath, dirnames, filenames in os.walk(full):
+                    dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+                    for fn in filenames:
+                        p = Path(dirpath) / fn
+                        if p.suffix.lower() not in VIDEO_EXTS or SAMPLE.search(p.stem):
+                            continue
+                        rel = p.relative_to(full)
+                        season, ep, title = parse_episode(rel)
+                        extra = any(EXTRA_DIR.match(d) for d in rel.parts[:-1]) or bool(EXTRA_FILE.search(p.stem))
+                        try:
+                            st = p.stat()
+                        except OSError:
+                            continue
+                        path = str(p.relative_to(self.base))
+                        rows.append((path, show_dir, series_root(show_dir, rel), season, ep, title,
+                                     int(extra), st.st_size, st.st_mtime, norm(path)))
+        # one series per show name: merges a show kept in several folders ("TV shows/Airwolf" and
+        # "TV/Airwolf", or "Night.Court.S01" ... "Night.Court.S09") into a single run of episodes
+        canonical: dict[str, str] = {}
+        for r in rows:
+            canonical.setdefault(norm(pretty(r[2])), r[2])
+        rows = [(*r[:2], canonical[norm(pretty(r[2]))], *r[3:]) for r in rows]
         with self.db:
             self.db.execute("DELETE FROM episodes")
             self.db.executemany(
@@ -260,7 +296,7 @@ class Library:
                        row["episode"], row["title"], bool(row["is_extra"]))
 
     def abspath(self, ep: Episode) -> str:
-        return str(self.root / ep.path)
+        return str(self.base / ep.path)
 
     def shows(self) -> list[str]:
         return [r[0] for r in self.db.execute("SELECT DISTINCT show FROM episodes ORDER BY show COLLATE NOCASE")]
@@ -303,9 +339,18 @@ class Library:
     def series_episodes(self, series: str, include_extras: bool = False) -> list[Episode]:
         sql = "SELECT * FROM episodes WHERE series=?" + ("" if include_extras else " AND is_extra=0")
         eps = [self._ep(r) for r in self.db.execute(sql, (series,))]
+        root_order = {r.name: i for i, r in enumerate(self.roots)}
         eps.sort(key=lambda e: (e.season if e.season is not None else 999,
-                                e.episode if e.episode is not None else 9999, e.path.lower()))
-        return eps
+                                e.episode if e.episode is not None else 9999,
+                                root_order.get(e.path.split("/")[0], 99), e.path.lower()))
+        # the same episode in two folders: keep one copy (first library folder wins)
+        seen, unique = set(), []
+        for e in eps:
+            k = (e.season, e.episode) if e.season is not None and e.episode is not None else e.path
+            if k not in seen:
+                seen.add(k)
+                unique.append(e)
+        return unique
 
     def search(self, text: str, season: int | None = None, episode: int | None = None,
                include_extras: bool = False, limit: int = 15) -> list[Episode]:
@@ -372,8 +417,8 @@ class Library:
             return None, 0.0
         last = self.db.execute("""SELECT h.* FROM history h JOIN episodes e ON e.path=h.path
             WHERE e.series=? AND e.is_extra=0 ORDER BY h.last_played DESC LIMIT 1""", (series,)).fetchone()
-        if last is None:
-            return eps[0], 0.0
+        if last is None:  # never watched: start at season 1, not with the specials in season 0
+            return next((e for e in eps if e.season), eps[0]), 0.0
         idx = next((i for i, e in enumerate(eps) if e.path == last["path"]), None)
         if idx is None:
             return eps[0], 0.0

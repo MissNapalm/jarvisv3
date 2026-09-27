@@ -1,6 +1,6 @@
 # TV assistant
 
-Voice assistant for a local TV-show library (default `/mnt/T/TV shows`, set `TV_LIBRARY` or `--library`). A language model understands requests and calls tools: by default the free
+Voice assistant for a local TV-show library (default `/mnt/T/TV shows` and `/mnt/T/TV`; set `TV_LIBRARY` or repeat `--library`). Shows kept in several folders are merged. A language model understands requests and calls tools: by default the free
 local `qwen3:14b` via Ollama on the GPU, or Claude (`claude-opus-5`) when an API key is set. faster-whisper
 (`large-v3-turbo`, on the GPU) does speech-to-text; Piper speaks replies; mpv plays episodes.
 

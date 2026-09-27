@@ -123,7 +123,7 @@ class Player:
         if not path:
             return None
         try:
-            rel = os.path.relpath(path, self.lib.root)
+            rel = os.path.relpath(path, self.lib.base)
         except ValueError:
             return None
         return self.lib.by_path(rel)

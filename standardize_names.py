@@ -25,7 +25,8 @@ from tvassist.library import (EXTRA_DIR, EXTRA_FILE, SAMPLE, SMALL_WORDS, VIDEO_
                               parse_episode_detail, pretty, series_root, title_case)
 
 BACKUP_DIR = os.path.join(HERE, "rename-backups")
-LIB_BACKUP_DIRNAME = "_rename-backup"   # a copy of every plan/log is also kept inside the library itself
+LIB_BACKUP_DIRNAME = "_rename-backup"
+LIB_NAME = "TV shows"   # a copy of every plan/log is also kept inside the library itself
 
 JUNK = re.compile(
     r"\b(1080p|720p|480p|576p|2160p|4k|uhd|x26[45]|h[ .]?26[45]|hevc|avc|bluray|blu-ray|brrip|bdrip|web[ .-]?dl|webrip|"
@@ -234,8 +235,9 @@ def update_history(old_new: list[tuple[str, str]]) -> None:
         return
     db = sqlite3.connect(db_path)
     with db:
+        prefix = LIB_NAME + "/"  # the assistant stores paths as "<library folder>/<show>/..."
         for old, new in old_new:
-            db.execute("UPDATE OR IGNORE history SET path=? WHERE path=?", (new, old))
+            db.execute("UPDATE OR IGNORE history SET path=? WHERE path=?", (prefix + new, prefix + old))
 
 
 def main() -> None:
@@ -246,6 +248,8 @@ def main() -> None:
     ap.add_argument("--no-library-copy", action="store_true", help="don't also copy backups into the library")
     args = ap.parse_args()
     root = Path(args.library)
+    global LIB_NAME
+    LIB_NAME = root.name
     os.makedirs(BACKUP_DIR, exist_ok=True)
     stamp = time.strftime("%Y-%m-%d_%H%M%S")
 

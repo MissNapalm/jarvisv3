@@ -26,7 +26,9 @@ DIM, BOLD, CYAN, GREEN, RESET = "\033[2m", "\033[1m", "\033[36m", "\033[32m", "\
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--library", default=os.environ.get("TV_LIBRARY", "/mnt/T/TV shows"))
+    ap.add_argument("--library", action="append",
+                    help="a library folder; repeat for several (default: $TV_LIBRARY, folders separated by ':', "
+                         "or /mnt/T/TV shows and /mnt/T/TV)")
     ap.add_argument("--text", action="store_true", help="keyboard only: no microphone, no speech output")
     ap.add_argument("--no-speak", action="store_true", help="use the microphone but print replies instead of speaking")
     ap.add_argument("--windowed", action="store_true", help="don't start mpv fullscreen")
@@ -57,8 +59,12 @@ def main() -> None:
 
     data_dir = os.path.join(HERE, "data")
     os.makedirs(data_dir, exist_ok=True)
-    lib = Library(args.library, os.path.join(data_dir, "library.db"))
-    print(f"{DIM}Indexing {args.library} ...{RESET}", end=" ", flush=True)
+    folders = args.library or os.environ.get("TV_LIBRARY", "/mnt/T/TV shows:/mnt/T/TV").split(":")
+    folders = [f for f in folders if f and os.path.isdir(f)]
+    if not folders:
+        sys.exit("No library folder found; pass --library /path/to/TV")
+    lib = Library(folders, os.path.join(data_dir, "library.db"))
+    print(f"{DIM}Indexing {', '.join(folders)} ...{RESET}", end=" ", flush=True)
     stats = lib.scan()
     print(f"{DIM}{stats['files']} files in {stats['seconds']}s{RESET}")
     if args.scan:
