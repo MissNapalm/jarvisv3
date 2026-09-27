@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Voice assistant for the TV-show library.
 
-Press Enter and speak, or type a command and press Enter. Ctrl+C / "quit" to exit.
+Say "Hey Jarvis" and then your request, press Enter and speak, or type a command and press Enter.
+Ctrl+C / "quit" to exit.
 """
 from __future__ import annotations
 
 import argparse
 import os
+import queue
+import subprocess
 import sys
 import threading
 import time
@@ -38,6 +41,7 @@ def main() -> None:
                     help="output device (name or part of it, e.g. 'USB Audio Speakers'); default: system default")
     ap.add_argument("--mic", default=os.environ.get("TV_MIC"),
                     help="microphone (name or part of it, e.g. 'Yeti'); default: system default")
+    ap.add_argument("--no-wake", action="store_true", help='turn off the "Hey Jarvis" wake word')
     ap.add_argument("--silence", type=float, default=0.8,
                     help="seconds of silence that end a spoken command (default 0.8; raise if it cuts you off)")
     ap.add_argument("--voice", default=os.path.join(HERE, "voices", "en_US-ryan-high.onnx"))
@@ -90,53 +94,110 @@ def main() -> None:
         print(f"{DIM}Brain: {args.local_model} (local, free) - loading ...{RESET}", flush=True)
         brain = LocalBrain(lib, player, model=args.local_model)
 
-    listen = speak = None
+    events: queue.Queue = queue.Queue()   # ("text", line) from the keyboard, ("speech", audio) from the mic
+    listener = speak = transcribe = None
     if not args.text:
         from tvassist import voice
         print(f"{DIM}Loading speech models ...{RESET}", flush=True)
         transcribe = voice.Transcriber(args.whisper_model)
-        listen = lambda: voice.record_utterance(silence_after=args.silence, device=mic)  # noqa: E731
         if not args.no_speak:
             speak = voice.Speaker(args.voice, device=speaker).say
+        chime = voice.make_chime(os.path.join(data_dir, "chime.wav"))
+
+        def on_wake():  # runs on the mic thread the moment "Hey Jarvis" is heard
+            subprocess.Popen(["pw-play", *(["--target", speaker] if speaker else []), chime],
+                             stderr=subprocess.DEVNULL)
+            player.duck()
+            print(f"\r{GREEN}● Hey Jarvis - listening…{RESET}   ", flush=True)
+
+        try:
+            listener = voice.MicListener(events, device=mic, silence_after=args.silence,
+                                         wake=not args.no_wake, on_wake=on_wake)
+        except ImportError:
+            print(f"{DIM}(wake word unavailable: pip install openwakeword){RESET}")
+            listener = voice.MicListener(events, device=mic, silence_after=args.silence, wake=False)
+
+    def keyboard():
+        while True:
+            line = sys.stdin.readline()
+            events.put(("text", line.rstrip("\n")) if line else ("eof", None))
+            if not line:
+                return
+
+    threading.Thread(target=keyboard, daemon=True).start()
 
     def show_tool(name, inp):
         print(f"  {DIM}→ {name}({', '.join(f'{k}={v!r}' for k, v in inp.items())}){RESET}")
 
-    hint = "type a command" if args.text else "press Enter and speak, or type a command"
+    def prompt():
+        print(f"{CYAN}›{RESET} ", end="", flush=True)
+
+    if args.text:
+        hint = "type a command"
+    elif listener and listener.model is not None:
+        hint = 'say "Hey Jarvis", press Enter and speak, or type a command'
+    else:
+        hint = "press Enter and speak, or type a command"
     print(f"\n{BOLD}TV assistant ready{RESET} ({hint}; 'reset' clears the conversation, 'quit' exits)\n")
     if speak:
         threading.Thread(target=speak, args=("Ready.",), daemon=True).start()
+    prompt()
 
+    retried = False
     while True:
         try:
-            typed = input(f"{CYAN}›{RESET} ").strip()
-        except (EOFError, KeyboardInterrupt):
+            kind, payload = events.get()
+        except KeyboardInterrupt:
             print()
             break
-        if typed.lower() in ("quit", "exit"):
+        if kind in ("eof", "mic_error"):
+            if kind == "mic_error":
+                print(f"\n{DIM}Microphone stopped: {payload}{RESET}")
+            print()
             break
-        if typed.lower() == "reset":
-            brain.reset()
-            print(f"{DIM}Conversation cleared.{RESET}")
-            continue
 
-        text = typed
-        if not text:
-            if listen is None:
+        if kind == "text":
+            typed = payload.strip()
+            if typed.lower() in ("quit", "exit"):
+                break
+            if typed.lower() == "reset":
+                brain.reset()
+                print(f"{DIM}Conversation cleared.{RESET}")
+                prompt()
                 continue
-            player.duck()
-            print(f"{GREEN}● listening…{RESET}", end="\r", flush=True)
-            audio = listen()
-            if audio is None:
+            if not typed:
+                if listener is None:
+                    prompt()
+                    continue
+                player.duck()
+                print(f"{GREEN}● listening…{RESET}", flush=True)
+                listener.request_recording()
+                continue
+            text = typed
+            if listener:
+                listener.disarm()
+        else:  # speech from the mic (wake word or Enter)
+            if payload is None:
                 player.unduck()
-                print(f"{DIM}(didn't hear anything){RESET}   ")
+                print(f"{DIM}(didn't hear anything){RESET}")
+                listener.arm()
+                prompt()
                 continue
             t = time.time()
-            text = transcribe(audio)
-            print(f"{BOLD}you:{RESET} {text}  {DIM}({time.time() - t:.1f}s){RESET}")
+            heard = transcribe(payload)
+            text = voice.strip_wake_phrase(heard)
+            print(f"{BOLD}you:{RESET} {heard}  {DIM}({time.time() - t:.1f}s){RESET}")
             if not text:
+                if not retried:  # just "Hey Jarvis" and a pause, or only noise: listen once more for the command
+                    retried = True
+                    listener.request_recording()
+                    print(f"{GREEN}● listening…{RESET}", flush=True)
+                    continue
                 player.unduck()
+                listener.arm()
+                prompt()
                 continue
+        retried = False
 
         t = time.time()
         try:
@@ -156,6 +217,9 @@ def main() -> None:
             player.duck()
             speak(reply)
         player.unduck()
+        if listener:
+            listener.arm()  # only listen for the wake word again once the reply has been spoken
+        prompt()
 
 
 if __name__ == "__main__":

@@ -23,13 +23,19 @@ The Whisper model (~1.6 GB) downloads automatically on first run.
 ## Run
 
 ```bash
-~/tv-assistant/tv              # Enter = talk, or type a command (free local model)
+~/tv-assistant/tv              # say "Hey Jarvis, ...", press Enter and talk, or type (free local model)
 ~/tv-assistant/tv --backend claude   # use Claude instead; key goes in ~/tv-assistant/.env as ANTHROPIC_API_KEY=...
+~/tv-assistant/tv --no-wake    # turn off the "Hey Jarvis" wake word
 ~/tv-assistant/tv --text       # keyboard only
 ~/tv-assistant/tv --windowed   # mpv in a window instead of fullscreen
 ~/tv-assistant/tv --silence 1.2   # wait longer before treating a pause as the end of a command (default 0.8 s)
 ~/tv-assistant/tv --scan       # just re-index and print stats
 ```
+
+Say **"Hey Jarvis"** and your request in one go ("Hey Jarvis, pause"); a chime confirms it heard you.
+Saying "Hey Jarvis", waiting for the chime and then the request also works. The wake word uses
+openWakeWord's bundled model; end of speech is detected with Silero VAD, so background noise doesn't
+keep it listening.
 
 Simple playback controls (pause, resume, stop, next/previous, volume, mute, seek, subtitles) are handled
 instantly without the model (`tvassist/quick.py`); everything else goes to the model. The library is
