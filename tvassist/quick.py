@@ -194,4 +194,9 @@ def handle_play(text: str, lib, tools: dict) -> str | None:
     if m:
         series = resolve_show(lib, m[1])
         return tools["continue_series"].call({"series": series}) if series else None
+    # just a show name ("Hey Jarvis, Firefly" - or "play" got swallowed by the wake word)
+    if len(t.split()) <= 6:
+        series = resolve_show(lib, t)
+        if series:
+            return tools["continue_series"].call({"series": series})
     return None

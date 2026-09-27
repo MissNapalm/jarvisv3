@@ -138,6 +138,7 @@ class MicListener:
         self.armed = threading.Event()
         self.armed.set()
         self._cooldown = 0
+        self._reset_pending = False
         self._record = threading.Event()
         # `source` (a raw 16 kHz s16 stream) replaces the mic in tests
         self.stream = source if source is not None else subprocess.Popen(
@@ -150,9 +151,7 @@ class MicListener:
 
     def arm(self) -> None:
         """Listen for the wake word again (call once the assistant has finished replying)."""
-        if self.model is not None:
-            self.model.reset()
-        self._cooldown = self.COOLDOWN_FRAMES
+        self._reset_pending = True  # done on the listener thread: the model isn't thread-safe
         self.armed.set()
 
     def disarm(self) -> None:
@@ -163,7 +162,8 @@ class MicListener:
         self._record.set()
 
     def _capture(self) -> None:
-        audio = record_utterance(silence_after=self.silence_after, source=self.stream)
+        # commands are short; a cap stops background talk or TV dialogue from keeping it recording
+        audio = record_utterance(silence_after=self.silence_after, source=self.stream, max_seconds=8)
         self.events.put(("speech", audio))
 
     def _run(self) -> None:
@@ -179,6 +179,10 @@ class MicListener:
                 return
             if self.model is None or not self.armed.is_set():
                 continue
+            if self._reset_pending:
+                self._reset_pending = False
+                self.model.reset()
+                self._cooldown = self.COOLDOWN_FRAMES
             score = max(self.model.predict(np.frombuffer(raw, dtype=np.int16)).values())
             if self._cooldown > 0:  # flush old audio out of the model before trusting it again
                 self._cooldown -= 1
