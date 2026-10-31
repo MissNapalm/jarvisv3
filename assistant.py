@@ -7,6 +7,7 @@ Ctrl+C / "quit" to exit.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import queue
 import re
@@ -60,7 +61,9 @@ def main() -> None:
     ap.add_argument("--scan", action="store_true", help="re-index the library and exit")
     ap.add_argument("--port", type=int, default=int(os.environ.get("TV_UI_PORT", 8765)),
                     help="port for the live web page (default 8765)")
-    ap.add_argument("--no-browser", action="store_true", help="don't open the web page on start")
+    ap.add_argument("--no-popup", action="store_true",
+                    help="don't pop up the little window when you say the wake word (it's always at the --port page)")
+    ap.add_argument("--window", action="store_true", help="also open the window on start (it stays open)")
     args = ap.parse_args()
 
     # Running as root inside a desktop session: reach the user's PipeWire and X display.
@@ -72,13 +75,76 @@ def main() -> None:
 
     data_dir = os.path.join(HERE, "data")
     os.makedirs(data_dir, exist_ok=True)
-    folders = args.library or os.environ.get("TV_LIBRARY", "/mnt/T/TV shows:/mnt/T/TV").split(":")
+
+    # The window first, so there's something to look at (with a loading bar) while the rest starts
+    on_idle: list = []  # run whenever it's back to waiting for a command
+    on_exit: list = []  # run on the way out
+    events: queue.Queue = queue.Queue()   # ("text", line) from the keyboard, ("speech", audio) from the mic
+    ui = None
+    if not args.scan:
+        from tvassist.ui import UI
+        ui = UI(events, port=args.port, settings_path=os.path.join(data_dir, "settings.json"))
+        # closing the window quits, right away, whatever it's doing (starting up, thinking, talking)
+        ui.on_last_window_closed = lambda: shutdown("Window closed")
+        if ui.url:
+            print(f"{DIM}Web page: {ui.url}{RESET}")
+            if args.window:
+                open_window(ui.url)
+        else:
+            print(f"{DIM}(web page unavailable: {ui.error}){RESET}")
+
+    # The cloned voice takes ~20 s to start: begin now, alongside everything else
+    clone = None
+    if not (args.scan or args.text or args.no_speak) and args.voice_sample:
+        from tvassist import voice
+        print(f"{DIM}Loading cloned voice from {args.voice_sample} (in the background) ...{RESET}", flush=True)
+        voice_done = ui.task("Warming up Wil’s voice", 20)
+
+        def voice_ready(error):
+            voice_done()
+            if error:
+                print(f"\n{DIM}(cloned voice unavailable, using the standard voice: {error}){RESET}", flush=True)
+        try:
+            clone = voice.CloneSpeaker(args.voice_sample, on_ready=voice_ready)
+        except Exception as e:
+            voice_ready(str(e))
+
+    # The library folders: chosen in the window on every start (last time's are filled in); from
+    # --library, or last time's, when there's no window to ask in
+    saved = (ui.settings.get("library") if ui else None) or \
+        [f for f in os.environ.get("TV_LIBRARY", "/mnt/T/TV shows").split(":") if f]
+    if args.library:
+        folders = args.library
+    elif ui and ui.url and (args.window or _wait_for(ui.has_viewers, 5)):
+        folders = choose_library(ui, saved)  # closing the window meanwhile shuts down (shutdown())
+    else:
+        folders = saved
     folders = [f for f in folders if f and os.path.isdir(f)]
     if not folders:
         sys.exit("No library folder found; pass --library /path/to/TV")
     lib = Library(folders, os.path.join(data_dir, "library.db"))
     print(f"{DIM}Indexing {', '.join(folders)} ...{RESET}", end=" ", flush=True)
-    stats = lib.scan()
+    scan_done = ui.task("Scanning the TV library", 4) if ui else (lambda: None)
+    seen = {"files": 0, "folder": "", "at": time.time()}
+    scanned = threading.Event()
+
+    def scan_progress(files, folder):
+        seen.update(files=files, folder=folder, at=time.time())
+
+    def watch_scan():  # keep the window's loading bar honest: a count while it moves, a warning when stuck
+        while not scanned.wait(0.5):
+            waiting = time.time() - seen["at"]
+            if waiting > 8:
+                where = os.path.basename(seen["folder"].rstrip("/")) or seen["folder"]
+                ui.task_detail("Scanning the TV library",
+                               f"network drive not answering ({waiting:.0f} s) at {where}", stalled=True)
+            else:
+                ui.task_detail("Scanning the TV library", f"{seen['files']:,} files")
+    if ui:
+        threading.Thread(target=watch_scan, daemon=True).start()
+    stats = lib.scan(progress=scan_progress)
+    scanned.set()
+    scan_done()
     print(f"{DIM}{stats['files']} files in {stats['seconds']}s{RESET}")
     if args.scan:
         print(lib.stats())
@@ -103,7 +169,7 @@ def main() -> None:
                 print(f"{DIM}Microphone: {desc}{RESET}")
         except ValueError as e:
             sys.exit(f"{e}. See the device list with: wpctl status")
-    player = Player(lib, data_dir, fullscreen=not args.windowed,
+    player = _player[0] = Player(lib, data_dir, fullscreen=not args.windowed,
                     mpv_args=[f"--audio-device=pipewire/{speaker}"] if speaker else None)
     if backend == "claude":
         from tvassist.brain import Brain
@@ -112,31 +178,24 @@ def main() -> None:
     else:
         from tvassist.local import LocalBrain
         print(f"{DIM}Brain: {args.local_model} (local, free) - loading ...{RESET}", flush=True)
+        brain_done = ui.task("Loading the brain", 4)
         brain = LocalBrain(lib, player, model=args.local_model, think=args.think)
+        brain_done()
+    ui.attach_player(player)
 
-    events: queue.Queue = queue.Queue()   # ("text", line) from the keyboard, ("speech", audio) from the mic
-    from tvassist.ui import UI
-    ui = UI(events, port=args.port, player=player)
-    if ui.url:
-        print(f"{DIM}Web page: {ui.url}{RESET}")
-        if not args.no_browser:
-            open_window(ui.url)
-    else:
-        print(f"{DIM}(web page unavailable: {ui.error}){RESET}")
     listener = speak = transcribe = None
     if not args.text:
         from tvassist import voice
         print(f"{DIM}Loading speech models ...{RESET}", flush=True)
+        ears_done = ui.task("Loading speech recognition", 1)
         transcribe = voice.Transcriber(args.whisper_model, hotwords="Hey Wil" if args.wake_word == "wil" else None)
+        ears_done()
         if not args.no_speak:
             piper = voice.Speaker(args.voice, device=speaker)
             speak = piper.say
-            if args.voice_sample:
-                print(f"{DIM}Loading cloned voice from {args.voice_sample} ...{RESET}", flush=True)
-                try:
-                    speak = voice.CloneSpeaker(args.voice_sample, device=speaker, fallback=piper).say
-                except Exception as e:
-                    print(f"{DIM}(cloned voice unavailable, using the standard voice: {e}){RESET}")
+            if clone is not None:  # still warming up, maybe: say() waits for it
+                clone.device, clone.fallback = speaker, piper
+                speak = clone.say
         chime = voice.make_chime(os.path.join(data_dir, "chime.wav"))
         heard_ping = voice.make_heard_ping(os.path.join(data_dir, "heard.wav"))
 
@@ -144,8 +203,70 @@ def main() -> None:
             subprocess.Popen(["pw-play", *(["--target", speaker] if speaker else []), path],
                              stderr=subprocess.DEVNULL)
 
+        # Wil's head: on screen whenever its checkbox is ticked (drag it anywhere; it remembers where),
+        # mouthing along with every reply. On the wake word, unless a window is already open, a little
+        # pop-up window too, which closes itself ~15 s after things go quiet.
+        win = [None]   # the pop-up window's process
+        head = [None]  # the talking head's process
+        face_images = [os.path.join(data_dir, f) for f in ("wiltop.png", "wiljaw.png")]  # head, jaw
+
+        def alive(proc):
+            return proc is not None and proc.poll() is None
+
+        def show_head():
+            if not alive(head[0]) and all(os.path.isfile(f) for f in face_images):
+                head[0] = subprocess.Popen(
+                    ["/usr/bin/python3", os.path.join(HERE, "tvassist", "face.py"), *face_images, "660",
+                     os.path.join(data_dir, "head-position.json")],
+                    env={**os.environ, "QT_QPA_PLATFORM": "xcb"}, stdin=subprocess.PIPE, text=True,
+                    stdout=subprocess.DEVNULL, stderr=open(os.path.join(data_dir, "face.log"), "w"),
+                    start_new_session=True)
+
+        def hide_head():
+            if alive(head[0]):
+                head[0].terminate()
+            head[0] = None
+
+        def close_popup(why=""):
+            if alive(win[0]):
+                print(f"\n{DIM}(pop-up closed: {why}){RESET}", flush=True)
+                win[0].terminate()
+            win[0] = None
+        ui.on_popup_done = lambda: close_popup("quiet")
+
+        def mouth(levels, fps):  # a reply is starting: move the head's jaw along with it
+            if alive(head[0]):
+                try:
+                    head[0].stdin.write(json.dumps({"say": levels, "fps": fps}) + "\n")
+                    head[0].stdin.flush()
+                except OSError:
+                    pass
+        voice.on_speech = mouth
+        ui.on_stop = voice.stop_speaking
+
+        def show_popup():
+            if args.no_popup or not ui.url or alive(win[0]) or ui.has_viewers():
+                return
+            proc = win[0] = open_window(ui.url + "?popup=1", size=(380, 520))
+
+            def follow():  # closed by hand
+                proc.wait()
+                if win[0] is proc:
+                    win[0] = None
+            threading.Thread(target=follow, daemon=True).start()
+
+        if ui.settings.get("head", True):
+            show_head()
+        on_exit.append(lambda: (close_popup("quitting"), hide_head()))
+
+        def setting_changed(name, value):  # the head checkbox: show or hide him right away
+            if name == "head":
+                show_head() if value else hide_head()
+        ui.on_setting = setting_changed
+
         def on_wake():  # runs on the mic thread the moment the wake phrase is heard
             ping(chime)
+            show_popup()
             player.hold()
             listen_started[0] = time.time()
             ui.state("listening", f"Heard “{wake_phrase}” — go ahead")
@@ -187,6 +308,8 @@ def main() -> None:
 
     def prompt():  # called whenever it's ready for the next command
         ui.state("idle", idle_hint)
+        for f in on_idle:
+            f()
         print(f"{CYAN}›{RESET} ", end="", flush=True)
 
     def answer(reply, secs, **extra):
@@ -199,6 +322,16 @@ def main() -> None:
         hint = f'say "{wake_phrase}", press Enter and speak, or type a command'
     else:
         hint = "press Enter and speak, or type a command"
+    # The window's "Calibrate mic" button: runs the mic check (between requests, on this thread)
+    check = [None]
+
+    def calibrate_button(action):
+        if action == "start":
+            events.put(("calibrate", None))
+        elif action == "skip" and check[0] is not None:
+            check[0].skip.set()
+    ui.on_calibrate = calibrate_button
+
     print(f"\n{BOLD}TV assistant ready{RESET} ({hint}; 'reset' clears the conversation, 'quit' exits)\n")
     if speak:
         threading.Thread(target=speak, args=("Ready.",), daemon=True).start()
@@ -211,6 +344,22 @@ def main() -> None:
             kind, payload = events.get()
         except KeyboardInterrupt:
             print()
+            break
+        if kind == "calibrate":
+            if listener is None:
+                ui.calibrate("done", "There's no microphone in use (started with --text).", ok=False)
+            else:
+                from tvassist.calibrate import MicCheck
+                listener.disarm()
+                ui.state("calibrating", "Follow the steps below")
+                check[0] = MicCheck(ui, mic, transcribe, chime=lambda: ping(chime))
+                check[0].run()
+                check[0] = None
+                listener.arm()
+            prompt()
+            continue
+        if kind == "window_closed":
+            print(f"\n{DIM}Window closed - shutting down.{RESET}")
             break
         if kind in ("eof", "mic_error"):
             if kind == "mic_error":
@@ -279,6 +428,8 @@ def main() -> None:
         t = time.time()
         reply = None
         ui.state("thinking")
+        if speak:
+            voice.allow_speech()  # a new request: undo an earlier Stop
         if report.wants_file_update(text):  # "give me a file update": compare with yesterday's files
             print(f"  {DIM}checking files…{RESET}", flush=True)
             reply, details = report.file_update(lib, data_dir)
@@ -316,20 +467,105 @@ def main() -> None:
         if listener:
             listener.arm()  # only listen for the wake word again once the reply has been spoken
         prompt()
+    for f in on_exit:
+        f()
 
 
-def open_window(url: str) -> None:
+_player = [None]  # set once it exists, so shutdown() can save where you were
+
+
+def _descendants() -> list[int]:
+    """Every process started from this one, however deep (voice server, head, pop-ups, mpv, mic...)."""
+    children: dict[int, list[int]] = {}
+    for d in os.listdir("/proc"):
+        if d.isdigit():
+            try:
+                with open(f"/proc/{d}/stat") as f:
+                    ppid = int(f.read().rsplit(")", 1)[1].split()[1])
+            except (OSError, IndexError, ValueError):
+                continue
+            children.setdefault(ppid, []).append(int(d))
+    out, todo = [], [os.getpid()]
+    while todo:
+        for c in children.get(todo.pop(), []):
+            out.append(c)
+            todo.append(c)
+    return out
+
+
+def shutdown(why: str = "") -> None:
+    """Stop everything this started and exit now (from any thread)."""
+    import signal
+    if why:
+        print(f"\n{DIM}{why} - shutting down.{RESET}", flush=True)
+    try:
+        if _player[0] is not None:
+            _player[0].stop()  # saves where you were in the episode
+    except Exception:
+        pass
+    procs = _descendants()
+    for pid in procs:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    end = time.time() + 2
+    while time.time() < end and any(os.path.exists(f"/proc/{p}") for p in procs):
+        time.sleep(0.1)
+    for pid in _descendants():  # anything that ignored the polite request
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    os._exit(0)
+
+
+def _wait_for(cond, seconds: float) -> bool:
+    end = time.time() + seconds
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def choose_library(ui, saved: list[str]) -> list[str]:
+    """Ask in the window which folders are the TV library; blocks until "Use these"."""
+    chosen: list = []
+    picked = threading.Event()
+
+    def use(folders):
+        missing = [f for f in folders if not os.path.isdir(f)]
+        if not folders:
+            return "Add at least one folder."
+        if missing:
+            return "Can't find " + ", ".join(missing) + " (is the drive connected?)"
+        chosen[:] = folders
+        ui.set("library", folders)  # filled in next time
+        ui.library("done", folders)
+        picked.set()
+        return None
+    ui.on_library = use
+    ui.state("starting", "Choose your TV library")
+    ui.library("choose", saved)
+    print(f"{DIM}Waiting for the TV library to be chosen in the window ...{RESET}", flush=True)
+    picked.wait()
+    ui.on_library = None
+    return chosen
+
+
+def open_window(url: str, size: tuple[int, int] = (440, 680)) -> subprocess.Popen:
     """Show the live page in a small app window (Chromium/Chrome --app), else a browser tab."""
     import shutil
     for exe in ("chromium", "google-chrome-stable", "google-chrome", "brave", "microsoft-edge-stable"):
         if shutil.which(exe):
             profile = os.path.join(HERE, "data", "window-profile")  # its own profile: opens as a separate window
-            cmd = [exe, f"--app={url}", "--window-size=440,680", f"--user-data-dir={profile}",
+            cmd = [exe, f"--app={url}", f"--window-size={size[0]},{size[1]}", f"--user-data-dir={profile}",
                    "--no-first-run", "--no-default-browser-check"]
             break
     else:
         cmd = ["xdg-open", url]
-    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 if __name__ == "__main__":
@@ -337,3 +573,4 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:  # Ctrl+C: exit quietly, whatever it was doing
         print()
+    shutdown()  # however it ended ("quit", Ctrl+C, the window): nothing it started is left running

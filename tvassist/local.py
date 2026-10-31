@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 
 import httpx
 
@@ -22,6 +24,14 @@ Rules for using tools:
 - For questions about how many shows or episodes there are, count from the tool results, not from memory."""
 
 
+# Facts the model has to remember (Star Trek, trivia) come out wrong far less often when it thinks first
+# (5/5 vs 2/5 in a quick test, ~1 s slower). Playback commands don't need it.
+TRIVIA = re.compile(r"\b(star ?trek|trek|trivia|quiz|captain|enterprise|voyager|deep space|klingon|vulcan|"
+                    r"romulan|borg|ferengi|cardassian|starfleet|federation|warp|picard|kirk|spock|sisko|"
+                    r"janeway|data|worf|riker|who (played|plays|was|is)|what (species|ship|rank|year))\b", re.I)
+TRIVIA_MINUTES = 3  # a quiz's answers ("the Defiant") get the same care for a while after
+
+
 class LocalBrain:
     def __init__(self, lib: Library, player: Player, model: str = DEFAULT_MODEL,
                  host: str = "http://127.0.0.1:11434", think: bool = False):
@@ -36,10 +46,12 @@ class LocalBrain:
         self.system = SYSTEM_TEMPLATE.format(
             n_series=len(series), series_list="\n".join(f"- {pretty(s)} [{s}]" for s in series)) + LOCAL_RULES
         self.messages: list[dict] = []
+        self._trivia_until = 0.0
         self.http.post("/api/chat", json={"model": model, "messages": [], "keep_alive": "4h"})  # load into VRAM now
 
     def reset(self) -> None:
         self.messages = []
+        self._trivia_until = 0.0
 
     def note(self, user_text: str, reply: str) -> None:
         """Record a command handled outside the model so later requests have the context."""
@@ -56,10 +68,13 @@ class LocalBrain:
 
     def ask(self, text: str, on_tool=None) -> str:
         self.messages.append({"role": "user", "content": text})
+        if TRIVIA.search(text):
+            self._trivia_until = time.time() + TRIVIA_MINUTES * 60
+        think = self.think or time.time() < self._trivia_until
         reply = ""
         for _ in range(MAX_TOOL_ROUNDS):
             r = self.http.post("/api/chat", json={
-                "model": self.model, "stream": False, "think": self.think, "keep_alive": "4h",
+                "model": self.model, "stream": False, "think": think, "keep_alive": "4h",
                 "messages": [{"role": "system", "content": self.system}, *self.messages],
                 "tools": self.tool_specs,
                 "options": {"num_ctx": 16384, "temperature": 0.2},

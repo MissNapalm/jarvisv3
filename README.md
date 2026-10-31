@@ -28,7 +28,8 @@ The Whisper model (~1.6 GB) downloads automatically on first run.
 ~/tv-assistant/tv --no-wake    # turn off the wake word
 ~/tv-assistant/tv --wake-word jarvis   # "Hey Jarvis" (openWakeWord) instead of "Hey Wil"
 ~/tv-assistant/tv --think      # let the local model reason first: a little more reliable, several seconds slower
-~/tv-assistant/tv --no-browser # don't open the live window (it's still at http://localhost:8765)
+~/tv-assistant/tv --window     # open the window on start (what wilagent.exe does); it's always at http://localhost:8765
+~/tv-assistant/tv --no-popup   # don't pop up a little window on "Hey Wil"
 ~/tv-assistant/tv --text       # keyboard only
 ~/tv-assistant/tv --windowed   # mpv in a window instead of fullscreen
 ~/tv-assistant/tv --silence 1.2   # wait longer before treating a pause as the end of a command (default 0.8 s)
@@ -41,9 +42,26 @@ the request. A rising chime means it heard "Hey Wil"; a short falling ping means
 bundled phrases) and it has to open what you say, so "Will you…" or "my friend Bill" don't wake it.
 End of speech is detected with Silero VAD, so background noise doesn't keep it listening.
 
-A small window (http://localhost:8765, opened in a Chromium app window on start) shows whether it's
-ready, listening, thinking or speaking, what you said and what it answered with times, and what's
-playing; you can type there or press Talk.
+### wilagent.exe and the window
+
+`wilagent.exe` (a shell script, despite the name; put a `.desktop` launcher pointing at it on the desktop or
+in `~/.local/share/applications`) starts the assistant in the background with its window, or just opens
+the window if it's already running. Closing the window shuts everything down (voice server, head, pop-ups,
+mic, mpv; your place in an episode is saved).
+
+The window (http://localhost:8765, a Chromium app window):
+- on start, asks which folders are the TV library (last time's are filled in; Add folder… opens KDE's
+  folder picker), with a loading bar that shows the file count while scanning and says when the network
+  drive stops answering
+- shows whether it's ready, listening, thinking or speaking, what you said and what it answered, and what's
+  playing; type there, press Talk, or press Stop (or Esc) to cut it off mid-sentence
+- 🎙 Calibrate mic: stay quiet a moment, say "Hey Wil, what's on tonight?", and it sets the mic's level
+- "Wil's head in the corner": a cut-out head (`data/wiltop.png` + `data/wiljaw.png`, same canvas, kept out
+  of git) floating on top of everything, draggable, whose jaw moves with the loudness of each reply
+  (`tvassist/face.py`, run with the system Python's PySide6 on XWayland)
+
+It also answers Star Trek trivia and runs a quiz ("quiz me on Star Trek"); for those it thinks before
+answering, which is far more accurate with the local model.
 
 Simple playback controls (pause, resume, stop, next/previous, volume, mute, seek, subtitles) are handled
 instantly without the model (`tvassist/quick.py`); everything else goes to the model. The library is
@@ -83,6 +101,7 @@ If it can't start, the assistant falls back to the Piper voice and says why (det
 - `tvassist/local.py`: the free local brain (Ollama)
 - `tvassist/quick.py`: instant handling of simple playback commands
 - `tvassist/ui.py`, `tvassist/ui.html`: the live window (local web page, server-sent events)
+- `tvassist/face.py`: Wil's talking head; `tvassist/calibrate.py`: the mic check; `wilagent.exe`: the launcher
 - `tvassist/report.py`: the "file update" comparison; `snapshot.py`: the daily snapshot job
 
 ## File update (are files disappearing?)

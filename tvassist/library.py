@@ -257,7 +257,8 @@ class Library:
             self.db.execute("INSERT OR REPLACE INTO meta VALUES('path_layout', 'relative-to-base')")
 
     # ---------- indexing ----------
-    def scan(self) -> dict:
+    def scan(self, progress=None) -> dict:
+        """Index the library. progress(files_seen, folder) is called as it goes (per folder)."""
         t0 = time.time()
         rows = []
         all_files: list[str] = []  # every file, not just videos, for the daily file-count snapshot
@@ -270,6 +271,8 @@ class Library:
                     all_files.append(str(full.relative_to(self.base)))
                     continue
                 for dirpath, dirnames, filenames in os.walk(full):
+                    if progress:
+                        progress(len(all_files), dirpath)
                     dirnames[:] = [d for d in dirnames if not d.startswith(".")]
                     for fn in filenames:
                         if fn.startswith("."):  # hidden temp files (download ".parts" etc.) come and go

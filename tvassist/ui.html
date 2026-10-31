@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Jarvis</title>
+<title>wilagent.exe</title>
 <style>
   :root {
     --bg: #0d1117; --panel: #161b22; --line: #2a313c; --text: #e6edf3; --muted: #8b949e;
@@ -31,7 +31,7 @@
                      100% { box-shadow: 0 0 0 22px transparent; } }
   @keyframes breathe { 50% { opacity: .45; transform: scale(.92); } }
   @keyframes speak { to { transform: scale(1.12); } }
-  body[data-state="listening"] { --c: var(--listening); }
+  body[data-state="listening"], body[data-state="calibrating"] { --c: var(--listening); }
   body[data-state="transcribing"] { --c: var(--transcribing); }
   body[data-state="thinking"] { --c: var(--thinking); }
   body[data-state="speaking"] { --c: var(--speaking); }
@@ -39,6 +39,60 @@
   .status p { margin: 2px 0 0; color: var(--muted); font-size: .95rem; }
   .conn { margin-left: auto; font-size: .8rem; color: var(--muted); white-space: nowrap; }
   .conn.off { color: #f85149; }
+
+  /* loading bar (startup) */
+  .loading { margin-top: 12px; }
+  .loading .track { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+  .loading .fill { height: 100%; width: 0; border-radius: 4px; transition: width .25s linear;
+                   background: linear-gradient(90deg, var(--thinking), var(--speaking)); }
+  .loading .what { display: flex; justify-content: space-between; gap: 12px; margin-top: 6px;
+                   font-size: .85rem; color: var(--muted); }
+  /* a step that's taking longer than usual: a moving stripe instead of a bar stuck near 100% */
+  .loading.busy .fill { width: 35% !important; transition: none; animation: sweep 1.3s ease-in-out infinite alternate; }
+  .loading.stuck .fill { background: var(--transcribing); }
+  .loading.stuck .what span { color: var(--transcribing); }
+  @keyframes sweep { from { transform: translateX(-10%); } to { transform: translateX(195%); } }
+  @media (prefers-reduced-motion: reduce) { .loading.busy .fill { animation: none; width: 100% !important; opacity: .5; } }
+  .loading .what b { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+
+  /* library chooser (startup) */
+  .lib { margin-top: 12px; padding: 14px 16px; border-radius: 12px; background: var(--panel);
+         border: 1px solid var(--thinking); }
+  .lib h2 { margin: 0 0 4px; font-size: 1.1rem; }
+  .lib .sub { margin: 0 0 10px; color: var(--muted); font-size: .9rem; }
+  .lib ul { list-style: none; margin: 0 0 10px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .lib li { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px;
+            background: var(--bg); border: 1px solid var(--line); font: .9rem/1.3 ui-monospace, Menlo, monospace; }
+  .lib li span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .lib li.missing span { color: #f85149; }
+  .lib li button { padding: 2px 8px; font-size: .85rem; }
+  .lib .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .lib .row button { padding: 8px 14px; }
+  .lib button.use { background: var(--thinking); border-color: transparent; color: white; }
+  .lib .err { margin: 8px 0 0; color: #f85149; font-size: .9rem; }
+
+  /* mic check (startup) */
+  .calib { margin-top: 12px; padding: 14px 16px; border-radius: 12px; background: var(--panel);
+           border: 1px solid var(--listening); }
+  .calib.ok { border-color: var(--line); }
+  .calib.bad { border-color: #d29922; }
+  .calib h2 { margin: 0 0 4px; font-size: .8rem; font-weight: 600; letter-spacing: .06em;
+              text-transform: uppercase; color: var(--muted); }
+  .calib p { margin: 0 0 12px; font-size: 1.15rem; font-weight: 600; }
+  .meter { position: relative; height: 14px; border-radius: 7px; background: var(--line); overflow: hidden; }
+  .meter i { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: 7px; transition: width .08s linear;
+             background: linear-gradient(90deg, var(--listening) 60%, var(--transcribing) 85%, #f85149); }
+  .meter b { position: absolute; top: 0; bottom: 0; left: 50%; width: 2px; background: var(--text); opacity: .6; }
+  .calib .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 10px;
+                font-size: .8rem; color: var(--muted); }
+  .calib button { padding: 6px 14px; font-size: .9rem; }
+
+  /* options */
+  .opts { display: flex; gap: 16px; padding: 8px 2px 0; font-size: .85rem; color: var(--muted); }
+  .opts label { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; user-select: none; }
+  .opts { align-items: center; }
+  .opts button.small { margin-left: auto; padding: 4px 10px; font-size: .85rem; font-weight: 500; }
+  .opts input { width: 16px; height: 16px; margin: 0; accent-color: var(--listening); cursor: pointer; }
 
   /* now playing */
   .playing { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 10px 14px;
@@ -74,7 +128,19 @@
            color: var(--text); font: inherit; font-weight: 600; cursor: pointer; }
   button:hover { border-color: var(--muted); }
   button.talk { background: var(--listening); border-color: transparent; color: #04140a; }
+  button.stop { background: #f85149; border-color: transparent; color: white; }
   button:disabled { opacity: .45; cursor: default; }
+
+  /* the little pop-up (opened by the wake word): tighter, and it eases in */
+  body.popup { padding: 0 12px; font-size: 15px; animation: popin .28s cubic-bezier(.2, .9, .3, 1.2); }
+  body.popup header { padding: 14px 0 12px; gap: 14px; }
+  body.popup .orb { width: 42px; height: 42px; }
+  body.popup .status h1 { font-size: 1.2rem; }
+  body.popup .conn:not(.off) { display: none; }
+  body.popup .msg { max-width: 88%; }
+  body.popup .bar { width: 70px; }
+  @keyframes popin { from { opacity: 0; transform: translateY(10px) scale(.97); } }
+  @media (prefers-reduced-motion: reduce) { body.popup { animation: none; } }
 </style>
 </head>
 <body data-state="starting">
@@ -82,10 +148,37 @@
     <div class="orb" aria-hidden="true"></div>
     <div class="status" role="status" aria-live="polite">
       <h1 id="state">Starting…</h1>
-      <p id="detail">Connecting to Jarvis</p>
+      <p id="detail">Connecting to wilagent.exe</p>
     </div>
     <span class="conn off" id="conn">offline</span>
   </header>
+  <div class="loading" id="loading" hidden>
+    <div class="track" role="progressbar" aria-label="Starting up" aria-valuemin="0" aria-valuemax="100" id="track">
+      <div class="fill" id="fill"></div>
+    </div>
+    <div class="what"><span id="step">Starting…</span><b id="pct">0%</b></div>
+  </div>
+  <section class="lib" id="lib" hidden>
+    <h2>Choose your TV library</h2>
+    <p class="sub">The folders your shows are in. Last time’s are filled in.</p>
+    <ul id="libList"></ul>
+    <div class="row">
+      <button type="button" id="libAdd">Add folder…</button>
+      <button type="button" class="use" id="libUse">Use these</button>
+    </div>
+    <p class="err" id="libErr" hidden></p>
+  </section>
+  <section class="calib" id="calib" hidden aria-live="polite">
+    <h2>Mic check</h2>
+    <p id="calibText">Stay quiet for a moment…</p>
+    <div class="meter" aria-hidden="true"><i id="meter"></i><b title="aim for about here"></b></div>
+    <div class="row"><span id="calibHint">The line marks a good speaking level.</span>
+      <button type="button" id="calibSkip">Skip</button></div>
+  </section>
+  <div class="opts">
+    <label><input type="checkbox" id="head" checked> Wil’s head in the corner</label>
+    <button type="button" class="small" id="calibrate" title="Set the mic's level from your voice">🎙 Calibrate mic</button>
+  </div>
   <div class="playing" id="playing" hidden>
     <span class="label">Playing</span>
     <span class="ep" id="ep"></span>
@@ -96,16 +189,34 @@
   <form id="form" autocomplete="off">
     <input id="text" placeholder="Type a command…" aria-label="Command">
     <button type="submit">Send</button>
+    <button type="button" class="stop" id="stop" title="Stop talking (Esc)" hidden>■ Stop</button>
     <button type="button" class="talk" id="talk" title="Listen for a command now (same as Enter in the terminal)">Talk</button>
   </form>
 
 <script>
 const LABELS = {
   starting: "Starting…", idle: "Ready", listening: "Listening…", transcribing: "Hearing you…",
-  thinking: "Thinking…", speaking: "Speaking…",
+  thinking: "Thinking…", speaking: "Speaking…", calibrating: "Mic check",
 };
 const $ = id => document.getElementById(id);
 const log = $("log");
+// Opened by the wake word: close again ~15 s after things go quiet, unless you've clicked or typed in it
+const POPUP = new URLSearchParams(location.search).has("popup");
+const CLOSE_AFTER_MS = 15000;
+let closeTimer = null, kept = false;
+if (POPUP) {
+  document.body.classList.add("popup");
+  for (const ev of ["pointerdown", "keydown"])
+    addEventListener(ev, () => { kept = true; clearTimeout(closeTimer); });
+}
+function scheduleClose(state) {
+  if (!POPUP || kept) return;
+  clearTimeout(closeTimer);
+  if (state === "idle") closeTimer = setTimeout(() => {
+    fetch("/popup-done", { method: "POST" }).catch(() => {});  // the assistant closes this window
+    window.close();
+  }, CLOSE_AFTER_MS);
+}
 let lastDay = null;
 
 function clock(t) { return new Date(t * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }); }
@@ -147,8 +258,13 @@ function setState(s) {
   document.body.dataset.state = s.state;
   $("state").textContent = LABELS[s.state] || s.state;
   $("detail").textContent = s.detail || "";
-  document.title = "Jarvis · " + (LABELS[s.state] || s.state);
+  document.title = "wilagent.exe · " + (LABELS[s.state] || s.state);
   $("talk").disabled = s.state !== "idle";
+  $("calibrate").disabled = s.state !== "idle";
+  const busy = s.state === "speaking" || s.state === "thinking";
+  $("stop").hidden = !busy;
+  $("talk").hidden = busy;
+  scheduleClose(s.state);
 }
 
 function setPlaying(now) {
@@ -160,11 +276,97 @@ function setPlaying(now) {
   $("time").textContent = `${now.position_min} / ${Math.round(now.duration_min)} min · vol ${Math.round(now.volume ?? 0)}`;
 }
 
+// Startup: each step says roughly how long it takes, so the bar keeps moving while it runs
+let tasks = [], loadTimer = null;
+function drawLoading() {
+  const left = tasks.filter(t => !t.done);
+  $("loading").hidden = !tasks.length || !left.length;
+  if ($("loading").hidden) { clearInterval(loadTimer); loadTimer = null; return; }
+  const now = Date.now() / 1000;
+  const total = tasks.reduce((a, t) => a + t.expected, 0);
+  const got = tasks.reduce((a, t) => a + (t.done ? t.expected : Math.min(now - t.started, t.expected * 0.95)), 0);
+  const pct = Math.min(99, Math.round(100 * got / total));
+  // the step everything is waiting on (the voice warms up alongside, so it isn't the one to report)
+  const main = left.find(t => !/voice/i.test(t.name)) || left[0];
+  const over = now - main.started > main.expected * 1.2;
+  $("loading").classList.toggle("busy", over || !!main.stalled);
+  $("loading").classList.toggle("stuck", !!main.stalled);
+  $("fill").style.width = pct + "%";
+  $("track").setAttribute("aria-valuenow", pct);
+  $("pct").textContent = over || main.stalled ? "" : pct + "%";
+  $("step").textContent = main.name + (main.detail ? " — " + main.detail : "…")
+    + (left.length > 1 ? "  (+ " + left.filter(t => t !== main).map(t => t.name.toLowerCase()).join(", ") + ")" : "");
+}
+function setLoading(list) {
+  tasks = list;
+  drawLoading();
+  if (!$("loading").hidden && !loadTimer) loadTimer = setInterval(drawLoading, 200);
+}
+
+// Mic check: shown while it runs, then the result for a few seconds
+let calibHide = null;
+function setCalibrate(m) {
+  clearTimeout(calibHide);
+  const box = $("calib");
+  if (!m.step || (m.step === "done" && Date.now() / 1000 - m.at > 8)) { box.hidden = true; return; }
+  box.hidden = false;
+  $("calibText").textContent = m.text;
+  box.className = "calib" + (m.step === "done" ? (m.ok ? " ok" : " bad") : "");
+  $("calibSkip").hidden = m.step === "done";
+  $("calibHint").textContent = m.step === "speak" ? "Speak normally, from where you usually sit."
+    : m.step === "done" ? "" : "The line marks a good speaking level.";
+  if (m.step === "done") { $("meter").style.width = "0"; calibHide = setTimeout(() => box.hidden = true, 6000); }
+}
+
+// Library chooser: shown at startup until "Use these"
+let libFolders = [];
+function drawLibrary(error) {
+  const list = $("libList");
+  list.replaceChildren(...libFolders.map((f, i) => {
+    const li = document.createElement("li");
+    if (!f.ok) li.className = "missing";
+    const name = document.createElement("span");
+    name.textContent = f.path + (f.ok ? "" : "  (not found)");
+    const rm = document.createElement("button");
+    rm.type = "button"; rm.textContent = "✕"; rm.title = "Remove"; rm.setAttribute("aria-label", "Remove " + f.path);
+    rm.onclick = () => { libFolders.splice(i, 1); drawLibrary(); };
+    li.append(name, rm);
+    return li;
+  }));
+  if (!libFolders.length) {
+    const li = document.createElement("li");
+    li.textContent = "No folders yet. Add one.";
+    list.append(li);
+  }
+  $("libUse").disabled = !libFolders.length;
+  $("libErr").hidden = !error;
+  $("libErr").textContent = error || "";
+}
+function setLibrary(m) {
+  $("lib").hidden = m.step !== "choose";
+  if (m.step === "choose") { libFolders = m.folders.slice(); drawLibrary(m.error); }
+}
+const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
+                                           body: JSON.stringify(body) }).then(r => r.json());
+$("libAdd").onclick = async () => {
+  $("libAdd").disabled = true;
+  try {
+    const last = libFolders.length ? libFolders[libFolders.length - 1].path : "";
+    const r = await post("/library", { action: "browse", start: last });
+    if (r.path && !libFolders.some(f => f.path === r.path)) libFolders.push({ path: r.path, ok: true });
+    drawLibrary();
+  } finally { $("libAdd").disabled = false; }
+};
+$("libUse").onclick = async () => {
+  const r = await post("/library", { folders: libFolders.map(f => f.path) });
+  if (r.error) drawLibrary(r.error);
+};
+
 function connect() {
-  const es = new EventSource("/events");
+  const es = new EventSource(POPUP ? "/events?popup=1" : "/events");
   es.onopen = () => { $("conn").textContent = "connected"; $("conn").classList.remove("off"); };
   es.onerror = () => {
-    $("conn").textContent = "offline — is Jarvis running?"; $("conn").classList.add("off");
+    $("conn").textContent = "offline — is wilagent.exe running?"; $("conn").classList.add("off");
     setState({ state: "starting", detail: "Waiting for the assistant…" });
   };
   es.onmessage = e => {
@@ -175,6 +377,11 @@ function connect() {
     else if (m.type === "message") add(m);
     else if (m.type === "state") setState(m);
     else if (m.type === "playing") setPlaying(m.now);
+    else if (m.type === "loading") setLoading(m.tasks);
+    else if (m.type === "calibrate") setCalibrate(m);
+    else if (m.type === "library") setLibrary(m);
+    else if (m.type === "meter") $("meter").style.width = Math.min(100, m.level * 100) + "%";
+    else if (m.type === "settings") $("head").checked = !!m.settings.head;
   };
 }
 
@@ -189,6 +396,15 @@ $("form").onsubmit = e => {
   $("text").value = "";
 };
 $("talk").onclick = () => say("");
+const stop = () => fetch("/stop", { method: "POST" });
+$("stop").onclick = stop;
+$("calibrate").onclick = () => fetch("/calibrate", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                      body: JSON.stringify({ action: "start" }) });
+$("calibSkip").onclick = () => fetch("/calibrate", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                     body: JSON.stringify({ action: "skip" }) });
+addEventListener("keydown", e => { if (e.key === "Escape" && !$("stop").hidden) stop(); });
+$("head").onchange = e => fetch("/settings", { method: "POST", headers: { "Content-Type": "application/json" },
+                                               body: JSON.stringify({ head: e.target.checked }) });
 connect();
 </script>
 </body>

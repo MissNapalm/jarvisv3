@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# wilagent.exe - desktop launcher: start the assistant in the background if it isn't running, then show its window.
+DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+PORT="${TV_UI_PORT:-8765}"
+if curl -s -o /dev/null --max-time 1 "http://localhost:$PORT/"; then
+  for exe in chromium google-chrome-stable google-chrome brave; do
+    if command -v "$exe" >/dev/null; then
+      exec "$exe" --app="http://localhost:$PORT/" --window-size=440,680 \
+        --user-data-dir="$DIR/data/window-profile" --no-first-run --no-default-browser-check >/dev/null 2>&1
+    fi
+  done
+  exec xdg-open "http://localhost:$PORT/"
+fi
+mkdir -p "$DIR/data"
+setsid "$DIR/tv" --window < /dev/null > "$DIR/data/jarvis.log" 2>&1 &

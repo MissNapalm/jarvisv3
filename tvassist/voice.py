@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import wave
 
 import numpy as np
@@ -295,6 +296,64 @@ class Transcriber:
         return " ".join(s.text.strip() for s in segments).strip()
 
 
+LIP_FPS = 30
+on_speech = None  # f(levels, fps): called as a reply starts playing, with its loudness (0-1) per frame
+
+
+def speech_levels(path: str, fps: int = LIP_FPS) -> list[float]:
+    """Loudness of a 16-bit WAV, one value per 1/fps s, scaled so ordinary speech peaks near 1."""
+    with wave.open(path) as w:
+        sr, ch = w.getframerate(), w.getnchannels()
+        a = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768
+    if ch > 1:
+        a = a.reshape(-1, ch).mean(axis=1)
+    step = max(1, sr // fps)
+    rms = np.sqrt(np.mean(a[:len(a) // step * step].reshape(-1, step) ** 2, axis=1))
+    if not len(rms) or rms.max() == 0:
+        return []
+    return [round(float(x), 3) for x in np.clip(rms / np.percentile(rms, 95), 0, 1)]
+
+
+_hushed = threading.Event()  # set by stop_speaking(): say nothing more until the next request
+_playing: "subprocess.Popen | None" = None
+
+
+def stop_speaking() -> None:
+    """Cut off whatever is being said, and skip speaking the reply being worked on."""
+    _hushed.set()
+    proc = _playing
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+    if on_speech:
+        try:
+            on_speech([], LIP_FPS)  # close the mouth
+        except Exception:
+            pass
+
+
+def allow_speech() -> None:
+    """A new request: replies may be spoken again."""
+    _hushed.clear()
+
+
+def play(path: str, device: str | None = None) -> None:
+    """Play a WAV (blocking), telling `on_speech` first so a face can move its mouth along."""
+    global _playing
+    if _hushed.is_set():
+        return
+    if on_speech:
+        try:
+            on_speech(speech_levels(path), LIP_FPS)
+        except Exception:
+            pass
+    proc = _playing = subprocess.Popen(["pw-play", *(["--target", device] if device else []), path],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    _, err = proc.communicate()
+    _playing = None
+    if proc.returncode != 0 and not _hushed.is_set():
+        print(f"[speech output failed: {err.strip() or proc.returncode}]")
+
+
 class Speaker:
     def __init__(self, voice_path: str, device: str | None = None):
         from piper import PiperVoice
@@ -310,21 +369,23 @@ class Speaker:
         try:
             with wave.open(path, "wb") as w:
                 self.voice.synthesize_wav(text, w)
-            r = subprocess.run(["pw-play", *(["--target", self.device] if self.device else []), path],
-                               capture_output=True, text=True)
-            if r.returncode != 0:
-                print(f"[speech output failed: {r.stderr.strip() or r.returncode}]")
+            play(path, self.device)
         finally:
             os.unlink(path)
 
 
 class CloneSpeaker:
     """Speaks in a cloned voice via Chatterbox Turbo, which runs in its own environment
-    (.venv-voice) as a small server process. Falls back to `fallback` (Piper) if it fails."""
+    (.venv-voice) as a small server process. Falls back to `fallback` (Piper) if it fails.
 
-    def __init__(self, sample_path: str, device: str | None = None, fallback: "Speaker | None" = None):
+    Starting it takes ~20 s (PyTorch, the model, the voice sample), so that happens in the background:
+    the constructor returns at once, `on_ready(error or None)` is called when it's up (or failed), and
+    say() waits for it if it's still starting."""
+
+    def __init__(self, sample_path: str, device: str | None = None, fallback: "Speaker | None" = None,
+                 on_ready=None):
         import json
-        import sys
+        import threading
         here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         py = os.path.join(here, ".venv-voice", "bin", "python")
         if not os.path.exists(py):
@@ -339,18 +400,31 @@ class CloneSpeaker:
         self.proc = subprocess.Popen([py, os.path.join(here, "tvassist", "clone_server.py"), sample_path],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open(log_path, "w"),
                                      text=True, bufsize=1, env=env)
-        while True:  # skip any library chatter until the server says it's ready
-            line = self.proc.stdout.readline()
-            if not line:
-                with open(log_path) as f:
-                    last = [ln.strip() for ln in f if ln.strip()][-1:] or ["no details"]
-                raise RuntimeError(f"voice cloning server failed to start ({last[0]}; see {log_path})")
-            if line.startswith("{") and json.loads(line).get("ready"):
-                break
+        self.ready, self.error = threading.Event(), None
+
+        def wait_ready():
+            while True:  # skip any library chatter until the server says it's ready
+                line = self.proc.stdout.readline()
+                if not line:
+                    with open(log_path) as f:
+                        last = [ln.strip() for ln in f if ln.strip()][-1:] or ["no details"]
+                    self.error = f"voice cloning server failed to start ({last[0]}; see {log_path})"
+                    break
+                if line.startswith("{") and json.loads(line).get("ready"):
+                    break
+            self.ready.set()
+            if on_ready:
+                on_ready(self.error)
+        threading.Thread(target=wait_ready, daemon=True).start()
 
     def say(self, text: str) -> None:
         text = clean_for_speech(text)
         if not text:
+            return
+        self.ready.wait(180)
+        if self.error or not self.ready.is_set():
+            if self.fallback:
+                self.fallback.say(text)
             return
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             path = f.name
@@ -370,10 +444,7 @@ class CloneSpeaker:
                 if self.fallback:
                     self.fallback.say(text)
                 return
-            r = subprocess.run(["pw-play", *(["--target", self.device] if self.device else []), path],
-                               capture_output=True, text=True)
-            if r.returncode != 0:
-                print(f"[speech output failed: {r.stderr.strip() or r.returncode}]")
+            play(path, self.device)
         finally:
             os.unlink(path)
 
