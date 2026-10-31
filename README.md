@@ -23,19 +23,27 @@ The Whisper model (~1.6 GB) downloads automatically on first run.
 ## Run
 
 ```bash
-~/tv-assistant/tv              # say "Hey Jarvis, ...", press Enter and talk, or type (free local model)
+~/tv-assistant/tv              # say "Hey Wil, ...", press Enter and talk, or type (free local model)
 ~/tv-assistant/tv --backend claude   # use Claude instead; key goes in ~/tv-assistant/.env as ANTHROPIC_API_KEY=...
-~/tv-assistant/tv --no-wake    # turn off the "Hey Jarvis" wake word
+~/tv-assistant/tv --no-wake    # turn off the wake word
+~/tv-assistant/tv --wake-word jarvis   # "Hey Jarvis" (openWakeWord) instead of "Hey Wil"
+~/tv-assistant/tv --think      # let the local model reason first: a little more reliable, several seconds slower
+~/tv-assistant/tv --no-browser # don't open the live window (it's still at http://localhost:8765)
 ~/tv-assistant/tv --text       # keyboard only
 ~/tv-assistant/tv --windowed   # mpv in a window instead of fullscreen
 ~/tv-assistant/tv --silence 1.2   # wait longer before treating a pause as the end of a command (default 0.8 s)
 ~/tv-assistant/tv --scan       # just re-index and print stats
 ```
 
-Say **"Hey Jarvis"** and your request in one go ("Hey Jarvis, pause"); a chime confirms it heard you.
-Saying "Hey Jarvis", waiting for the chime and then the request also works. The wake word uses
-openWakeWord's bundled model; end of speech is detected with Silero VAD, so background noise doesn't
-keep it listening.
+Say **"Hey Wil"** and your request in one go ("Hey Wil, pause"), or "Hey Wil", wait for the chime, then
+the request. A rising chime means it heard "Hey Wil"; a short falling ping means it has your request.
+"Hey Wil" is spotted by transcribing each stretch of speech with Whisper (it's not one of openWakeWord's
+bundled phrases) and it has to open what you say, so "Will you…" or "my friend Bill" don't wake it.
+End of speech is detected with Silero VAD, so background noise doesn't keep it listening.
+
+A small window (http://localhost:8765, opened in a Chromium app window on start) shows whether it's
+ready, listening, thinking or speaking, what you said and what it answered with times, and what's
+playing; you can type there or press Talk.
 
 Simple playback controls (pause, resume, stop, next/previous, volume, mute, seek, subtitles) are handled
 instantly without the model (`tvassist/quick.py`); everything else goes to the model. The library is
@@ -74,11 +82,12 @@ If it can't start, the assistant falls back to the Piper voice and says why (det
 - `tvassist/brain.py`: the tools, system prompt, and the Claude brain
 - `tvassist/local.py`: the free local brain (Ollama)
 - `tvassist/quick.py`: instant handling of simple playback commands
+- `tvassist/ui.py`, `tvassist/ui.html`: the live window (local web page, server-sent events)
 - `tvassist/report.py`: the "file update" comparison; `snapshot.py`: the daily snapshot job
 
 ## File update (are files disappearing?)
 
-Say **"Hey Jarvis, give me a file update"** (or "are any files missing?", "check the files"). It rescans
+Say **"Hey Wil, give me a file update"** (or "are any files missing?", "check the files"). It rescans
 the library and compares with the previous day's snapshot: the total, how many files went missing or
 appeared, and which shows they belong to. The full list prints on screen and is saved to
 `data/file-report-<date>.txt`.

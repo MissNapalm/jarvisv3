@@ -54,7 +54,7 @@ def record_utterance(max_seconds: float = 15.0, silence_after: float = 0.8,
     or opens the mic itself when no source is given.
     """
     proc = None if source is not None else subprocess.Popen(
-        ["pw-record", *(["--target", device] if device else []),
+        ["pw-record", "--raw", *(["--target", device] if device else []),
          "--rate", str(RATE), "--channels", "1", "--format", "s16", "-"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     stream = source if source is not None else proc.stdout
@@ -92,26 +92,46 @@ def record_utterance(max_seconds: float = 15.0, silence_after: float = 0.8,
     return np.concatenate(frames) if speaking and frames else None
 
 
-WAKE_PHRASE = re.compile(r"^\W*(?:(?:hey|hi|ok|okay|a)\W+)?(?:jarvis|jarvus|travis|jervis)\b\W*", re.I)
+# "Hey Wil" (and the ways Whisper spells it), or "Hey Jarvis". "Wil" needs the "hey": a command can
+# start with "Will you ...".
+WAKE_PHRASE = re.compile(r"^\W*(?:(?:(?:hey|hi|ok|okay|a)\W+)?(?:jarvis|jarvus|travis|jervis)"
+                         r"|(?:hey|hay|hi|ok|okay)\W*(?:wil+|wills?|wheel|bill|phil))\b\W*", re.I)
 
 
 def strip_wake_phrase(text: str) -> str:
-    """Drop a leading "Hey Jarvis," that leaked into the recorded command."""
+    """Drop a leading "Hey Wil," / "Hey Jarvis," that leaked into the recorded command."""
     return WAKE_PHRASE.sub("", text).strip()
 
 
-def make_chime(path: str) -> str:
-    """A short two-note chime to acknowledge the wake word."""
-    t = np.arange(int(0.09 * 22050)) / 22050
-    fade = np.minimum(1, np.minimum(t, t[::-1]) / 0.01)
-    notes = [np.sin(2 * np.pi * f * t) * fade * 0.35 for f in (880, 1320)]
-    audio = (np.concatenate([notes[0], np.zeros(600), notes[1]]) * 32767).astype(np.int16)
+def _bells(path: str, notes, seconds: float, decay: float, level: float) -> str:
+    """Write overlapping bell tones, notes = [(start s, Hz), ...], to a WAV file."""
+    sr = 22050
+    audio = np.zeros(int(seconds * sr))
+    t = np.arange(len(audio)) / sr
+    for start, f in notes:
+        tt = np.clip(t - start, 0, None)
+        env = np.minimum(1, tt / 0.004) * np.exp(-tt * decay) * (t >= start)  # quick attack, gentle ring-out
+        bell = (np.sin(2 * np.pi * f * tt) + 0.25 * np.sin(2 * np.pi * 2 * f * tt) * np.exp(-tt * 8)
+                + 0.08 * np.sin(2 * np.pi * 3.01 * f * tt) * np.exp(-tt * 12))  # bell-like overtones
+        audio += bell * env
+    audio *= np.minimum(1, (len(audio) - np.arange(len(audio))) / (0.05 * sr))  # no click at the end
+    audio = (audio / np.abs(audio).max() * level * 32767).astype(np.int16)
     with wave.open(path, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
-        w.setframerate(22050)
+        w.setframerate(sr)
         w.writeframes(audio.tobytes())
     return path
+
+
+def make_chime(path: str) -> str:
+    """'Hey Jarvis' heard: a soft rising G major arpeggio (G5, B5, D6)."""
+    return _bells(path, [(0.0, 783.99), (0.07, 987.77), (0.14, 1174.66)], seconds=0.75, decay=6, level=0.5)
+
+
+def make_heard_ping(path: str) -> str:
+    """Your request heard: a short falling pair (D6, G5), the wake chime's answer."""
+    return _bells(path, [(0.0, 1174.66), (0.08, 783.99)], seconds=0.45, decay=10, level=0.4)
 
 
 class MicListener:
@@ -123,12 +143,17 @@ class MicListener:
     WAKE_FRAME = 1280  # 80 ms, what openWakeWord expects
 
     def __init__(self, events, device: str | None = None, silence_after: float = 0.8,
-                 wake: bool = True, wake_threshold: float = 0.4, on_wake=None, source=None):
+                 wake: bool = True, wake_threshold: float = 0.4, on_wake=None, source=None,
+                 wake_word: str = "wil", transcriber: "Transcriber | None" = None):
+        """wake_word "jarvis" uses openWakeWord's model; any other ("wil") is spotted by transcribing
+        what you say with `transcriber` and checking it starts with the wake phrase."""
         import threading
         self.events, self.silence_after, self.on_wake = events, silence_after, on_wake
         self.wake_threshold = wake_threshold
         self.model = None
-        if wake:
+        self.transcriber = transcriber if wake and wake_word != "jarvis" else None
+        self.wakes = wake and (self.transcriber is not None or wake_word == "jarvis")
+        if wake and wake_word == "jarvis":
             import warnings
             import openwakeword
             from openwakeword.model import Model
@@ -143,10 +168,10 @@ class MicListener:
         self._record = threading.Event()
         # `source` (a raw 16 kHz s16 stream) replaces the mic in tests
         self.stream = source if source is not None else subprocess.Popen(
-            ["pw-record", *(["--target", device] if device else []),
+            ["pw-record", "--raw", *(["--target", device] if device else []),
              "--rate", str(RATE), "--channels", "1", "--format", "s16", "-"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
-        threading.Thread(target=self._run, daemon=True).start()
+        threading.Thread(target=self._run_transcribed if self.transcriber else self._run, daemon=True).start()
 
     COOLDOWN_FRAMES = 20  # 1.6 s: the model's feature buffer still holds the last "Hey Jarvis"
 
@@ -194,6 +219,54 @@ class MicListener:
                     self.on_wake()
                 self._capture()
 
+    WAKE_WINDOW = 3.0  # seconds: the wake phrase has to open what you say
+
+    def _run_transcribed(self) -> None:
+        """Wake word by transcription: catch each stretch of speech, and if it starts with "Hey Wil",
+        chime right away (checked every ~0.5 s while you talk) and hand the whole utterance over."""
+        stream = self.stream
+        end_after = round(self.silence_after / CHUNK_SEC)
+        window, max_chunks = round(self.WAKE_WINDOW / CHUNK_SEC), round(10 / CHUNK_SEC)
+        pre_roll = 4 + MIN_SPEECH_CHUNKS
+        frames, speaking, run, silent, woken = [], False, 0, 0, False
+        while True:
+            if self._record.is_set():
+                self._record.clear()
+                self._capture()
+                frames, speaking, run, woken = [], False, 0, False
+                continue
+            raw = stream.read(CHUNK * 2)  # keep draining even when not armed
+            if len(raw) < CHUNK * 2:
+                self.events.put(("mic_error", "microphone stream ended"))
+                return
+            if not self.armed.is_set() or self._reset_pending:
+                self._reset_pending = False
+                frames, speaking, run, woken = [], False, 0, False
+                continue
+            chunk = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768
+            frames.append(chunk)
+            is_speech = speech_prob(chunk) >= SPEECH_THRESHOLD
+            run = run + 1 if is_speech else 0
+            if not speaking:
+                if run < MIN_SPEECH_CHUNKS:
+                    frames = frames[-pre_roll:]
+                    continue
+                speaking, silent = True, 0
+            silent = 0 if is_speech else silent + 1
+            ended = silent >= end_after or len(frames) >= max_chunks
+            if not woken and (ended or (len(frames) <= window + pre_roll and len(frames) % 5 == 0)):
+                if WAKE_PHRASE.match(self.transcriber.quick(np.concatenate(frames[:window + pre_roll]))):
+                    woken = True
+                    if self.on_wake:
+                        self.on_wake()
+            if ended:
+                audio = np.concatenate(frames)
+                frames, speaking, run = [], False, 0
+                if woken:  # otherwise it was just talk (or the TV): drop it and keep listening
+                    woken = False
+                    self.disarm()
+                    self.events.put(("speech", audio))
+
 
 class Transcriber:
     def __init__(self, model: str = "large-v3-turbo", device: str = "cuda", hotwords: str | None = None):
@@ -213,6 +286,13 @@ class Transcriber:
         if len(audio) < 2.5 * RATE and re.sub(r"[^a-z ]", "", text.lower()).strip() in self.PHANTOMS:
             return ""
         return text
+
+
+    def quick(self, audio: np.ndarray) -> str:
+        """Fast, rough transcript (greedy, no VAD pass): good enough to spot the wake phrase."""
+        segments, _ = self.model.transcribe(audio, language="en", beam_size=1, without_timestamps=True,
+                                            condition_on_previous_text=False, hotwords=self.hotwords)
+        return " ".join(s.text.strip() for s in segments).strip()
 
 
 class Speaker:

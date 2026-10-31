@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Voice assistant for the TV-show library.
 
-Say "Hey Jarvis" and then your request, press Enter and speak, or type a command and press Enter.
+Say "Hey Wil" and then your request, press Enter and speak, or type a command and press Enter.
 Ctrl+C / "quit" to exit.
 """
 from __future__ import annotations
@@ -37,6 +37,8 @@ def main() -> None:
                     help="local = free, runs on your GPU via Ollama; claude = Claude API (needs ANTHROPIC_API_KEY); "
                          "auto = claude if a key is set, otherwise local")
     ap.add_argument("--local-model", default="qwen3:14b", help="Ollama model for the local backend")
+    ap.add_argument("--think", action="store_true",
+                    help="let the local model reason before answering: a little more reliable, several seconds slower")
     ap.add_argument("--effort", default="low", choices=["low", "medium", "high"],
                     help="Claude effort: low is snappiest for voice (default)")
     ap.add_argument("--whisper-model", default="large-v3-turbo")
@@ -44,7 +46,9 @@ def main() -> None:
                     help="output device (name or part of it, e.g. 'USB Audio Speakers'); default: system default")
     ap.add_argument("--mic", default=os.environ.get("TV_MIC"),
                     help="microphone (name or part of it, e.g. 'Yeti'); default: system default")
-    ap.add_argument("--no-wake", action="store_true", help='turn off the "Hey Jarvis" wake word')
+    ap.add_argument("--no-wake", action="store_true", help="turn off the wake word")
+    ap.add_argument("--wake-word", default=os.environ.get("TV_WAKE_WORD", "wil"), choices=["wil", "jarvis"],
+                    help='"wil" (say "Hey Wil"; spotted by Whisper) or "jarvis" (openWakeWord); default wil')
     ap.add_argument("--wake-sensitivity", type=float, default=float(os.environ.get("TV_WAKE_THRESHOLD", 0.4)),
                     help='wake word score needed, 0-1 (default 0.4; lower = hears quieter voices, '
                          'but more false triggers)')
@@ -54,6 +58,9 @@ def main() -> None:
     ap.add_argument("--voice-sample", default=os.environ.get("TV_VOICE_SAMPLE"),
                     help="WAV recording (10-30 s) of a voice to clone for replies (needs .venv-voice)")
     ap.add_argument("--scan", action="store_true", help="re-index the library and exit")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("TV_UI_PORT", 8765)),
+                    help="port for the live web page (default 8765)")
+    ap.add_argument("--no-browser", action="store_true", help="don't open the web page on start")
     args = ap.parse_args()
 
     # Running as root inside a desktop session: reach the user's PipeWire and X display.
@@ -77,6 +84,7 @@ def main() -> None:
         print(lib.stats())
         return
 
+    wake_phrase = "Hey Wil" if args.wake_word == "wil" else "Hey Jarvis"
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
     backend = args.backend if args.backend != "auto" else ("claude" if has_key else "local")
     if backend == "claude" and not has_key:
@@ -104,14 +112,22 @@ def main() -> None:
     else:
         from tvassist.local import LocalBrain
         print(f"{DIM}Brain: {args.local_model} (local, free) - loading ...{RESET}", flush=True)
-        brain = LocalBrain(lib, player, model=args.local_model)
+        brain = LocalBrain(lib, player, model=args.local_model, think=args.think)
 
     events: queue.Queue = queue.Queue()   # ("text", line) from the keyboard, ("speech", audio) from the mic
+    from tvassist.ui import UI
+    ui = UI(events, port=args.port, player=player)
+    if ui.url:
+        print(f"{DIM}Web page: {ui.url}{RESET}")
+        if not args.no_browser:
+            open_window(ui.url)
+    else:
+        print(f"{DIM}(web page unavailable: {ui.error}){RESET}")
     listener = speak = transcribe = None
     if not args.text:
         from tvassist import voice
         print(f"{DIM}Loading speech models ...{RESET}", flush=True)
-        transcribe = voice.Transcriber(args.whisper_model)
+        transcribe = voice.Transcriber(args.whisper_model, hotwords="Hey Wil" if args.wake_word == "wil" else None)
         if not args.no_speak:
             piper = voice.Speaker(args.voice, device=speaker)
             speak = piper.say
@@ -122,17 +138,23 @@ def main() -> None:
                 except Exception as e:
                     print(f"{DIM}(cloned voice unavailable, using the standard voice: {e}){RESET}")
         chime = voice.make_chime(os.path.join(data_dir, "chime.wav"))
+        heard_ping = voice.make_heard_ping(os.path.join(data_dir, "heard.wav"))
 
-        def on_wake():  # runs on the mic thread the moment "Hey Jarvis" is heard
-            subprocess.Popen(["pw-play", *(["--target", speaker] if speaker else []), chime],
+        def ping(path):
+            subprocess.Popen(["pw-play", *(["--target", speaker] if speaker else []), path],
                              stderr=subprocess.DEVNULL)
+
+        def on_wake():  # runs on the mic thread the moment the wake phrase is heard
+            ping(chime)
             player.hold()
             listen_started[0] = time.time()
-            print(f"\r{GREEN}● Hey Jarvis - listening…{RESET}   ", flush=True)
+            ui.state("listening", f"Heard “{wake_phrase}” — go ahead")
+            print(f"\r{GREEN}● {wake_phrase} - listening…{RESET}   ", flush=True)
 
         try:
             listener = voice.MicListener(events, device=mic, silence_after=args.silence,
                                          wake=not args.no_wake, on_wake=on_wake,
+                                         wake_word=args.wake_word, transcriber=transcribe,
                                          wake_threshold=args.wake_sensitivity)
         except ImportError:
             print(f"{DIM}(wake word unavailable: pip install openwakeword){RESET}")
@@ -145,21 +167,36 @@ def main() -> None:
             if not line:
                 return
 
-    threading.Thread(target=keyboard, daemon=True).start()
+    if sys.stdin.isatty():  # run as a service there's no keyboard: the web page is the input, keep running
+        threading.Thread(target=keyboard, daemon=True).start()
 
     from tvassist.brain import build_tools
     quick_tools = {t.name: t for t in build_tools(lib, player)}
 
     def show_tool(name, inp):
-        print(f"  {DIM}→ {name}({', '.join(f'{k}={v!r}' for k, v in inp.items())}){RESET}")
+        call = f"{name}({', '.join(f'{k}={v!r}' for k, v in inp.items())})"
+        ui.message("tool", call)
+        print(f"  {DIM}→ {call}{RESET}")
 
-    def prompt():
+    if args.text:
+        idle_hint = "Type a command"
+    elif listener and listener.wakes:
+        idle_hint = f"Say “{wake_phrase}”, press Talk, or type"
+    else:
+        idle_hint = "Press Talk or type a command"
+
+    def prompt():  # called whenever it's ready for the next command
+        ui.state("idle", idle_hint)
         print(f"{CYAN}›{RESET} ", end="", flush=True)
+
+    def answer(reply, secs, **extra):
+        ui.message("jarvis", reply, secs=round(secs, 1), **extra)
+        print(f"{BOLD}assistant:{RESET} {reply}  {DIM}({secs:.1f}s){RESET}")
 
     if args.text:
         hint = "type a command"
-    elif listener and listener.model is not None:
-        hint = 'say "Hey Jarvis", press Enter and speak, or type a command'
+    elif listener and listener.wakes:
+        hint = f'say "{wake_phrase}", press Enter and speak, or type a command'
     else:
         hint = "press Enter and speak, or type a command"
     print(f"\n{BOLD}TV assistant ready{RESET} ({hint}; 'reset' clears the conversation, 'quit' exits)\n")
@@ -177,6 +214,7 @@ def main() -> None:
             break
         if kind in ("eof", "mic_error"):
             if kind == "mic_error":
+                ui.message("info", f"Microphone stopped: {payload}")
                 print(f"\n{DIM}Microphone stopped: {payload}{RESET}")
             print()
             break
@@ -187,6 +225,7 @@ def main() -> None:
                 break
             if typed.lower() == "reset":
                 brain.reset()
+                ui.message("info", "Conversation cleared")
                 print(f"{DIM}Conversation cleared.{RESET}")
                 prompt()
                 continue
@@ -196,34 +235,42 @@ def main() -> None:
                     continue
                 player.hold()
                 listen_started[0] = time.time()
+                ui.state("listening", "Go ahead")
                 print(f"{GREEN}● listening…{RESET}", flush=True)
                 listener.request_recording()
                 continue
             text = typed
+            ui.message("you", text, via="typed")
             if listener:
                 listener.disarm()
         else:  # speech from the mic (wake word or Enter)
             if payload is None:
                 player.release()
+                ui.message("info", "Didn't hear anything")
                 print(f"{DIM}(didn't hear anything){RESET}")
                 listener.arm()
                 prompt()
                 continue
             listened = time.time() - listen_started[0] if listen_started[0] else 0
             t = time.time()
+            ui.state("transcribing", f"Listened {listened:.1f} s")
             heard = transcribe(payload)
             text = voice.strip_wake_phrase(heard)
+            if heard.strip():
+                ui.message("you", heard, via="voice", secs=round(time.time() - t, 1))
             print(f"{BOLD}you:{RESET} {heard}  {DIM}(listened {listened:.1f}s, transcribed {time.time() - t:.1f}s){RESET}")
             if not text:
-                if not retried:  # just "Hey Jarvis" and a pause, or only noise: listen once more for the command
+                if not retried:  # just "Hey Wil" and a pause, or only noise: listen once more for the command
                     retried = True
                     listener.request_recording()
+                    ui.state("listening", "Go ahead")
                     print(f"{GREEN}● listening…{RESET}", flush=True)
                     continue
                 player.release()
                 listener.arm()
                 prompt()
                 continue
+            ping(heard_ping)  # only now: it has an actual request, not just "Hey Wil"
         retried = False
         if re.search(r"\b(pause|stop|hold on|hang on|wait|quit|turn (it )?off)\b", text.lower()):
             player.forget_hold()  # the user wants it paused/stopped: don't resume afterwards
@@ -231,13 +278,15 @@ def main() -> None:
 
         t = time.time()
         reply = None
+        ui.state("thinking")
         if report.wants_file_update(text):  # "give me a file update": compare with yesterday's files
             print(f"  {DIM}checking files…{RESET}", flush=True)
             reply, details = report.file_update(lib, data_dir)
             print(details)
             brain.note(text, reply)
-            print(f"{BOLD}assistant:{RESET} {reply}  {DIM}({time.time() - t:.1f}s){RESET}")
+            answer(reply, time.time() - t)
             if speak:
+                ui.state("speaking")
                 speak(reply)
             if listener:
                 listener.arm()
@@ -249,7 +298,8 @@ def main() -> None:
                 reply = quick.handle_play(text, lib, quick_tools)
         except Exception:
             reply = None
-        if reply is not None:
+        quick_reply = reply is not None
+        if quick_reply:
             print(f"  {DIM}⚡ quick command{RESET}")
             brain.note(text, reply)
         else:
@@ -257,14 +307,29 @@ def main() -> None:
                 reply = brain.ask(text, on_tool=show_tool)
             except Exception as e:  # keep the assistant alive through API/network errors
                 reply = f"Sorry, something went wrong: {e}"
-        print(f"{BOLD}assistant:{RESET} {reply}  {DIM}({time.time() - t:.1f}s){RESET}")
+        answer(reply, time.time() - t, quick=quick_reply)
         if speak and reply:
             player.duck()
+            ui.state("speaking")
             speak(reply)
         player.unduck()
         if listener:
             listener.arm()  # only listen for the wake word again once the reply has been spoken
         prompt()
+
+
+def open_window(url: str) -> None:
+    """Show the live page in a small app window (Chromium/Chrome --app), else a browser tab."""
+    import shutil
+    for exe in ("chromium", "google-chrome-stable", "google-chrome", "brave", "microsoft-edge-stable"):
+        if shutil.which(exe):
+            profile = os.path.join(HERE, "data", "window-profile")  # its own profile: opens as a separate window
+            cmd = [exe, f"--app={url}", "--window-size=440,680", f"--user-data-dir={profile}",
+                   "--no-first-run", "--no-default-browser-check"]
+            break
+    else:
+        cmd = ["xdg-open", url]
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 if __name__ == "__main__":

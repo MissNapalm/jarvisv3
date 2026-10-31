@@ -172,7 +172,7 @@ def resolve_show(lib, name: str) -> str | None:
 def handle_play(text: str, lib, tools: dict) -> str | None:
     """Instantly handle "play/continue <show>" and "play <show> season X episode Y"; else None."""
     t = normalize(text)
-    t = re.sub(r"^(?:hey jarvis|jarvis)\s+", "", t)
+    t = re.sub(r"^(?:hey jarvis|jarvis|hey,? wil+)\s+", "", t)
     m = (re.fullmatch(PLAY + r" (?:the )?(.+?) season " + N + r" episode " + N, t) or
          re.fullmatch(PLAY + r" season " + N + r" episode " + N + r" of (?:the )?(.+)", t) or
          re.fullmatch(PLAY + r" episode " + N + r" of season " + N + r" of (?:the )?(.+)", t))

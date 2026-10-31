@@ -24,9 +24,9 @@ Rules for using tools:
 
 class LocalBrain:
     def __init__(self, lib: Library, player: Player, model: str = DEFAULT_MODEL,
-                 host: str = "http://127.0.0.1:11434", think: bool = True):
+                 host: str = "http://127.0.0.1:11434", think: bool = False):
         self.model = model
-        self.think = think  # reasoning before acting: slower, but far fewer "said it but didn't do it" slips
+        self.think = think  # reasoning before acting: fewer "said it but didn't do it" slips, but ~10x slower
         self.http = httpx.Client(base_url=host, timeout=120)
         self.tools = {t.name: t for t in build_tools(lib, player)}
         self.tool_specs = [{"type": "function", "function": {
